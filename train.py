@@ -376,8 +376,12 @@ def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
                          )
     print(f"[{tag}] params={n_par/1e6:.1f}M device={device} amp={amp}")
 
-    pts = sorted({int(round(tc.total_steps ** (i / (tc.probe_points - 1))))
-        for i in range(tc.probe_points)} | {tc.total_steps})
+    # log-spaced 在后半段几乎无点（16000 步下 8000 之后只剩终点一个），
+# 而「逃逸后 Δ 是否稳定」是相图最主要的混淆，每格都需要能回答。
+# 补线性点：4000 起每 4000 一个。
+    pts = sorted(set(probe_points(tc.total_steps))
+             | set(range(4000, tc.total_steps + 1, 4000))
+             | {tc.total_steps})
     it = iter(loader)
     tok_seen = 0
     t0 = time.time()

@@ -89,7 +89,18 @@ def load(tag: str, out_dir: str, device):
     model = LM(mc).to(device)
     model.load_state_dict({k: v.float() for k, v in ck["model"].items()})
     model.eval()
-    conv = ck.get("eval", {})
+    conv = dict(ck.get("eval", {}))
+    if "copy_acc" not in conv:
+        # checkpoint 的 eval 字段只存了 acc/acc_tail0，而 classify 需要
+        # copy_acc 区分 retrieval 与 position 态。回读 jsonl 末条 eval。
+        with open(jl) as f:
+            for line in f:
+                try:
+                    o = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if o.get("kind") == "eval":
+                    conv = o
     return model, spec, corpus, meta, conv
 
 
@@ -110,6 +121,27 @@ def ctrl_view(d: Doc, vocab: Vocab, cfg: CorpusCfg, rng) -> Optional[EditedDoc]:
                      d.q_attr, d.q_hist_k, delta, len(stmts), d, "rarity",
                      +1, -1)
 
+def axis_dd(tag: str, fallback: int) -> int:
+    """从 tag 解析 ΔD 轴值。corpus.delta_d_lo 是 dd_band 的下界（轴值 5 → 2、
+    16 → 8），直接打印会让 ΔD=2 和 ΔD=3 都显示成 2，75 行的表无法肉眼比对。"""
+    import re
+    m = re.search(r"_D(\d+)_", tag)
+    return int(m.group(1)) if m else fallback
+
+def classify(acc, copy_acc, corpus) -> str:
+    """retr / posNN% / none。Δ 只在 retr 态有意义：position 态的模型没有检索
+    回路（copy_acc≈0），其 break_rarity 响应是位置规则的副产物、方向恒为负，
+    混进相图会在低 R_old 角伪造出一个 frequency 型区域。
+    posCeil = 1/(dd_hi-dd_lo+1) 是纯位置规则的解析上限（unmarked 时每条语句
+    恰 4 token、答案恒在倒数第 1+ΔD 条）。实测吻合到 98%。"""
+    if acc != acc or copy_acc != copy_acc:
+        return "?"
+    ceil = 1.0 / (corpus.delta_d_hi - corpus.delta_d_lo + 1)
+    if copy_acc >= 0.95 and acc >= 0.99:
+        return "retr"
+    if copy_acc < 0.5 and acc >= 0.5 * ceil:
+        return f"pos{acc / ceil:.0%}"
+    return "none"
 
 def run_one(tag: str, out_dir: str, n_docs: int, device) -> dict:
     model, spec, corpus, meta, conv = load(tag, out_dir, device)
@@ -150,38 +182,68 @@ def run_one(tag: str, out_dir: str, n_docs: int, device) -> dict:
 
     nan = float("nan")
     n = len(ds)
+    acc = conv.get("acc", nan)
+    ca = conv.get("copy_acc", nan)
+    dd_axis = axis_dd(tag, corpus.delta_d_lo)
     return dict(
-        tag=tag, r_old=corpus.r_old_lo, dd=corpus.delta_d_lo,
+        tag=tag, r_old=corpus.r_old_lo, dd=dd_axis,
+        dd_lo=corpus.delta_d_lo, dd_hi=corpus.delta_d_hi,
         n=n, yield_rate=n / len(docs),
         d_margin=(sum(ds) / n) if n else nan,
         frac_positive=(sum(signs) / n) if n else nan,
         mass=(sum(masses) / n) if n else nan,
         ctrl_n=len(cs),
         ctrl_margin=(sum(cs) / len(cs)) if cs else nan,
-        acc=conv.get("acc", nan), tail0=conv.get("acc_tail0", nan))
+        acc=acc, tail0=conv.get("acc_tail0", nan),
+        copy_acc=ca, state=classify(acc, ca, corpus))
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("tags", nargs="+", help="run tag，如 R3_D5_s0_big")
+    ap.add_argument("tags", nargs="+", help="run tag，如 R3_D5_s0_grid")
     ap.add_argument("--out", default="runs")
     ap.add_argument("--docs", type=int, default=400)
     ap.add_argument("--txt", default="runs/go_nogo.txt")
     a = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    rows = [run_one(t, a.out, a.docs, dev) for t in a.tags]
+    rows = []
+    for i, t in enumerate(a.tags, 1):
+        print(f"[{i}/{len(a.tags)}] {t}", flush=True)
+        rows.append(run_one(t, a.out, a.docs, dev))
+    rows.sort(key=lambda r: (r["r_old"], r["dd"], r["tag"]))
 
     lines = [
-        f"{'tag':<22} {'R':>3} {'ΔD':>3} {'acc':>6} {'yield':>6} {'n':>5} "
-        f"{'Δ':>8} {'frac+':>6} {'mass':>6} {'ctrlN':>6} {'ctrl':>8}"]
+        f"{'tag':<22} {'R':>3} {'ΔD':>3} {'band':>7} {'state':>7} {'acc':>6} "
+        f"{'copy':>6} {'yield':>6} {'n':>5} {'Δ':>8} {'frac+':>6} "
+        f"{'mass':>6} {'ctrlN':>6} {'ctrl':>8}"]
     for r in rows:
         lines.append(
-            f"{r['tag']:<22} {r['r_old']:>3} {r['dd']:>3} {r['acc']:>6.3f} "
-            f"{r['yield_rate']:>6.2f} {r['n']:>5} {r['d_margin']:>+8.3f} "
-            f"{r['frac_positive']:>6.2f} {r['mass']:>6.2f} "
-            f"{r['ctrl_n']:>6} {r['ctrl_margin']:>+8.3f}")
+            f"{r['tag']:<22} {r['r_old']:>3} {r['dd']:>3} "
+            f"{f'[{r
+["dd_lo"]},{r["dd_hi"]}]':>7} {r['state']:>7} {r['acc']:>6.3f} "
+            f"{r['copy_acc']:>6.3f} {r['yield_rate']:>6.2f} {r['n']:>5} "
+            f"{r['d_margin']:>+8.3f} {r['frac_positive']:>6.2f} "
+            f"{r['mass']:>6.2f} {r['ctrl_n']:>6} {r['ctrl_margin']:>+8.3f}")
+
+    agg = {}
+    for r in rows:
+        if r["state"] == "retr" and r["mass"] >= 0.5:
+            agg.setdefault((r["r_old"], r["dd"]), []).append(r["d_margin"])
+    if agg:
+        rs = sorted({k[0] for k in agg})
+        ds = sorted({k[1] for k in agg})
+        lines += ["", "格均值（state=retr 且 mass≥0.5）  行=R_old 列=ΔD",
+                  "      " + "".join(f"{d:>9}" for d in ds)]
+        for rr in rs:
+            cs = []
+            for dd in ds:
+                v = agg.get((rr, dd))
+                cs.append(f"{sum(v) / len(v):>+9.2f}" if v else f"{'—':>9}")
+            lines.append(f"R{rr:>4} " + "".join(cs))
+
     lines += [
         "",
         "判读：Δ>0 rarity 型 / Δ<0 frequency 型 / |Δ|≈0 纯 recency。",
+        "state=retr 才可用：pos 态无检索回路、Δ 是位置规则副产物、方向恒为负。",
         "mass<0.5 读数无效（模型已脱离任务）。|ctrl| 应远小于 |Δ|。",
         "跨格 Δ 有梯度才算方向成立；单格绝对值不构成结论。",
         "",
