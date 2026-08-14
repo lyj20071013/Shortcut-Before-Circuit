@@ -227,10 +227,9 @@ def run_probe(model: LM, docs: Sequence[Doc], vocab: Vocab, spec: LangSpec,
     for kind in EDITS:
         r = causal(docs, pred, kind, offset, vocab, corpus)
         if r["yield_rate"] >= YIELD_MIN:
-            out["causal"][kind] = {k: r[k] for k in
-                                   ("target", "sign", "n", "yield_rate",
-                                    "d_margin", "frac_expected",
-                                    "dd_cond", "dd_all")}
+            keys = ("target", "sign", "n", "yield_rate", "d_margin",
+                    "frac_expected", "dd_cond", "dd_all", "mass_mean")
+            out["causal"][kind] = {k: r[k] for k in keys if k in r}
     model.train()
     return out
 
@@ -376,12 +375,17 @@ def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
                          )
     print(f"[{tag}] params={n_par/1e6:.1f}M device={device} amp={amp}")
 
-    # log-spaced 在后半段几乎无点（16000 步下 8000 之后只剩终点一个），
-# 而「逃逸后 Δ 是否稳定」是相图最主要的混淆，每格都需要能回答。
-# 补线性点：4000 起每 4000 一个。
-    pts = sorted(set(probe_points(tc.total_steps))
-             | set(range(4000, tc.total_steps + 1, 4000))
-             | {tc.total_steps})
+    # 探针点：几何 spacing（16000 步下是 1/5/25/127/635/3187/16000）覆盖早期相变，
+# 但 3187 之后直接跳到终点，中间 13000 步空白，而「逃逸后 Δ 是否稳定」是相图
+# 的主要混淆（R16/D2 实测 3187 的 +2.83 到 16000 的 +2.24，降 21%，中间无点
+# 无法判断是单调下降还是早已走平）。故并入每 2000 一个的线性点。
+    n_log = max(2, tc.probe_points)
+    pts = {max(1, int(round(tc.total_steps ** (i / (n_log - 1)))))
+       for i in range(n_log)}
+    pts |= set(range(2000, tc.total_steps + 1, 2000))
+    pts.add(tc.total_steps)
+    pts = sorted(p for p in pts if 1 <= p <= tc.total_steps)
+   
     it = iter(loader)
     tok_seen = 0
     t0 = time.time()
