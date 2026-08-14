@@ -649,7 +649,11 @@ def causal(docs: Sequence[Doc], predictor, kind: str, offset: int,
                 frac_expected=(sum(sign * x > 0 for x in deltas) / n) if n else nan,
                 dd_cond=(sum(dd) / len(dd)) if dd else nan,
                 dd_all=sum(x.realized_delta for x in docs) / len(docs),
-                mass_mean=(sum(masses) / n) if n else nan, )
+                mass_mean=(sum(masses) / n) if n else nan, 
+                d_all=deltas,        # 逐篇 Δ。frac+ 与均值矛盾（R5/D5: Δ=+0.52 而
+                     # frac+=0.56）说明效应由少数文档承载，均值不足以
+                     # 描述分布。200 篇约 3KB/probe 点。
+                )
 
 
 def contamination(docs: Sequence[Doc], kind: str, offset: int, vocab: Vocab,

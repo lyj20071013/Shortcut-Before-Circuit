@@ -224,12 +224,12 @@ def run_probe(model: LM, docs: Sequence[Doc], vocab: Vocab, spec: LangSpec,
            n_disc={k: rows[k]["n_disc"] for k in RULE_NAMES},
            agree_all={k: rows[k]["rate"] for k in RULE_NAMES},
            causal={})
+    KEYS = ("target", "sign", "n", "yield_rate", "d_margin", "frac_expected",
+        "dd_cond", "dd_all", "mass_mean", "d_all")
     for kind in EDITS:
         r = causal(docs, pred, kind, offset, vocab, corpus)
         if r["yield_rate"] >= YIELD_MIN:
-            keys = ("target", "sign", "n", "yield_rate", "d_margin",
-                    "frac_expected", "dd_cond", "dd_all", "mass_mean")
-            out["causal"][kind] = {k: r[k] for k in keys if k in r}
+            out["causal"][kind] = {k: r[k] for k in KEYS if k in r}
     model.train()
     return out
 
