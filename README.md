@@ -558,7 +558,5 @@ route:
 
 ## 📄 License
 
-TODO — pick one before making the repo public. Apache 2.0 is assumed by the badge above.
-
 <div align="center">
 </div>
