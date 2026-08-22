@@ -16,9 +16,9 @@
 
 ## 📢 News
 
-- **[2025/xx/xx]** 🧪 **Side arms released.** Fixed-band, slot-matched, QK-gain and depth arms, plus the flat-direction geometry suite.
-- **[2025/xx/xx]** 🔥 **Third seed complete.** The 75-run grid (25 cells × 3 seeds) and the full verification pipeline are in.
-- **[2025/xx/xx]** 💻 **Code released.** Generator, training, causal probe and every table-producing script.
+- **[2026/8/22]** 🧪 **Side arms released.** Fixed-band, slot-matched, QK-gain and depth arms, plus the flat-direction geometry suite.
+- **[2025/8/18]** 🔥 **Third seed complete.** The 75-run grid (25 cells × 3 seeds) and the full verification pipeline are in.
+- **[2025/8/11]** 💻 **Code released.** Generator, training, causal probe and every table-producing script.
 
 ---
 
@@ -545,10 +545,10 @@ route:
 ## 📜 Citation
 
 ```bibtex
-@misc{liao2025shortcut,
+@misc{liao2026shortcut,
       title={Shortcut Before Circuit: Document Statistics Time In-Context Conflict Resolution},
       author={Yijun Liao and Fanwei Liang},
-      year={2025},
+      year={2026},
       eprint={XXXX.XXXXX},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
