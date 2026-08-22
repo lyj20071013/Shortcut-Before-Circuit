@@ -320,7 +320,8 @@ def lr_at(step: int, c: TrainCfg) -> float:
 
 
 def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
-          spec: Optional[LangSpec] = None, tag_suffix: str = "") -> dict:
+          spec: Optional[LangSpec] = None, tag_suffix: str = "",
+          ckpt_steps: Optional[Sequence[int]] = None) -> dict:
     spec = spec or LangSpec()
     vocab = Vocab(spec)
     torch.manual_seed(tc.seed)
@@ -363,6 +364,32 @@ def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
         logf.write(json.dumps(rec, ensure_ascii=False) + "\n")
         logf.flush()
 
+    ck_set = set(ckpt_steps or ())
+    ck_dir = os.path.join(tc.out_dir, "ckpt")
+    if ck_set:
+        os.makedirs(ck_dir, exist_ok=True)
+
+    def save_ckpt(step: int):
+        """中途 checkpoint，只为 flatdir.py 的梯度测量而存。
+
+        两个刻意的差别，都不能改：
+        fp32 而非 bf16 —— 终态 .pt 存 bf16 省盘，但 cos(g_L, g_Δ) 的量级在
+        1e-3 附近，bf16 的 8 位尾数会把 θ 舍到与该量级同阶，测出来的角度是
+        舍入噪声。梯度算术本身在 fp32，起点也必须是 fp32。
+        不存 optimizer state —— Adam 的二阶矩会让盘占翻三倍，而 flatdir 测
+        的是 ∇L 与 ∇Δ 的几何关系，不重启训练。代价是这些 ckpt 不能续跑，
+        flatdir.py 的 docstring 里写清了这一条对结论的限制。
+
+        存盘不取随机数、不动 dataloader 迭代器，故加 --ckpt-steps 之后
+        训练轨迹与不加时逐比特相同（App A 的可复现性论证不受影响）。
+        """
+        mdl = model._orig_mod if tc.compile else model
+        torch.save(dict(model={k: v.float().cpu()
+                               for k, v in mdl.state_dict().items()},
+                        model_cfg=asdict(mc), corpus=asdict(corpus),
+                        train=asdict(tc), spec=asdict(spec), step=step),
+                   os.path.join(ck_dir, f"{tag}_s{step}.pt"))
+
     n_par = (model._orig_mod if tc.compile else model).n_params()
     emit(dict(kind="meta", corpus=asdict(corpus), train=asdict(tc),
               model=asdict(mc), spec=asdict(spec), n_params=n_par,
@@ -370,6 +397,7 @@ def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
               .n_params(embed=False),
               device=device, amp=str(amp),
               rule_groups=groups,
+              ckpt_steps=sorted(ck_set),
               ident_top={k: v for k, v in
                          sorted(ident.items(), key=lambda kv: -kv[1])[:5]})
                          )
@@ -430,6 +458,12 @@ def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
             emit(dict(kind="probe", step=step, dominant=dom, **pb))
             print(f"  step {step:>6} probe dominant={dom} "
           + " ".join(f"{k}={pb['agree'][k]:.2f}" for k in RULE_NAMES))
+
+        if step in ck_set:
+            save_ckpt(step)
+            emit(dict(kind="ckpt", step=step,
+                      path=os.path.join("ckpt", f"{tag}_s{step}.pt")))
+            print(f"  step {step:>6} ckpt -> ckpt/{tag}_s{step}.pt")
     
     final_eval = evaluate(model, eval_docs, vocab, spec, device)
     final_copy = copy_diag(model, eval_docs, vocab, spec, corpus, device)
@@ -479,14 +513,38 @@ def main():
     ap.add_argument("--d-model", type=int, default=None)
     ap.add_argument("--n-layer", type=int, default=None)
     ap.add_argument("--n-head", type=int, default=None)
-    a = ap.parse_args()
+    ap.add_argument("--qk-gain", type=float, default=None,
+                    help="QK-norm 增益初值，默认 2.0（App B 的 Eq.5）")
+    # 固定带宽 arm：显式给 ΔD 支撑区间，绕过 dd_band 的相对带宽。
+    # dd_band(d, rel=0.5) 的支撑随 d 变宽（3/3/7/9/17），posCeil 从 0.333
+    # 掉到 0.059，与 ΔD 轴共线 —— 这是 §8 点名但未完成的那个控制。
+    # 给 --dd-lo/--dd-hi 即可令支撑恒定（宽 9 -> posCeil 恒为 0.111）。
+    # --d 仍是标签轴值，只决定 tag 里的 D 号，不再决定区间。
+    ap.add_argument("--dd-lo", type=int, default=None,
+                    help="ΔD 支撑下界，覆盖 dd_band；须与 --dd-hi 同时给")
+    ap.add_argument("--dd-hi", type=int, default=None,
+                    help="ΔD 支撑上界，覆盖 dd_band；须与 --dd-lo 同时给")
+    # 中途 checkpoint：只为 flatdir.py 的梯度对齐测量而存，默认不存。
+    # 存盘不消耗 RNG、不动 dataloader，故训练轨迹仍逐比特可复现。
+    ap.add_argument("--ckpt-steps", type=str, default="",
+                    help="逗号分隔的步号，在这些步存 fp32 checkpoint")
+    ap.add_argument("--ckpt-every", type=int, default=0,
+                    help="每 N 步存一个 fp32 checkpoint（与 --ckpt-steps 取并集）")
+    a = ap.parse_args()          # <- 必须在所有 add_argument 之后
 
     over = {k: v for k, v in
             dict(n_values=a.n_values, n_entities=a.n_entities,
                  ctx_len=a.ctx_len).items() if v is not None}
     spec = replace(LangSpec(), **over) if over else LangSpec()
 
-    dlo, dhi = dd_band(a.d)
+    if (a.dd_lo is None) != (a.dd_hi is None):
+        ap.error("--dd-lo 与 --dd-hi 必须同时给：只给一半会静默退回 dd_band")
+    if a.dd_lo is not None:
+        dlo, dhi = a.dd_lo, a.dd_hi
+        print(f"[band] ΔD ~ U[{dlo},{dhi}] 支撑宽 {dhi - dlo + 1} "
+              f"posCeil={1.0 / (dhi - dlo + 1):.3f}（显式，非 dd_band）")
+    else:
+        dlo, dhi = dd_band(a.d)
     ckw = {}
     if a.stmts_lo is not None:
         ckw["n_stmts_lo"] = a.stmts_lo
@@ -500,6 +558,8 @@ def main():
         mkw["n_layer"] = a.n_layer
     if a.n_head is not None:
         mkw["n_head"] = a.n_head
+    if a.qk_gain is not None:
+        mkw["qk_norm_gain"] = a.qk_gain
     
     corpus = CorpusCfg(name=f"R{a.r}_D{a.d}_s{a.seed}", seed=a.seed,
                        p_update=0.5, max_updates=1,
@@ -509,8 +569,11 @@ def main():
               sched=a.sched, wd=a.wd, num_workers=a.workers, out_dir=a.out,
               eval_docs=a.eval_docs, eval_every=a.eval_every,
               compile=a.compile)
-    train(corpus, tc, mc_kw=dict(tie_embed=a.tie), spec=spec,
-          tag_suffix=("_" + a.tag if a.tag else ""))
-
+    ck = {int(x) for x in a.ckpt_steps.split(",") if x.strip()}
+    if a.ckpt_every > 0:
+        ck |= set(range(a.ckpt_every, a.steps + 1, a.ckpt_every))
+    train(corpus, tc, mc_kw=mkw, spec=spec,
+        tag_suffix=("_" + a.tag if a.tag else ""),
+        ckpt_steps=sorted(s for s in ck if 1 <= s <= a.steps))
 if __name__ == "__main__":
     main()

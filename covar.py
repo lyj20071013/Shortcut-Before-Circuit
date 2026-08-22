@@ -26,11 +26,17 @@ from vocab import Vocab
 
 R_OLDS = [3, 5, 8, 12, 16]
 DDS = [2, 3, 5, 8, 16]
+
+def band_of(d, fixw=0):
+    """fixw>0: 固定宽度带 [d, d+fixw]，切断 posCeil 与 ΔD 的共线。
+    fixw=0: 主网格的 dd_band(d)，宽度随 d 增长。"""
+    return (d, d + fixw) if fixw else dd_band(d)
+
 NAN = float("nan")
 
 
-def mk_cfg(r, d, seed=0, lo_st=45, hi_st=55):
-    lo, hi = dd_band(d)
+def mk_cfg(r, d, seed=0, lo_st=45, hi_st=55, fixw=0):
+    lo, hi = band_of(d, fixw)
     return CorpusCfg(name=f"R{r}_D{d}", seed=seed, p_update=0.5,
                      max_updates=1, r_old_lo=r, r_old_hi=r,
                      use_marker=False, delta_d_lo=lo, delta_d_hi=hi,
@@ -164,17 +170,21 @@ def main():
     ap.add_argument("--n-entities", type=int, default=200)
     ap.add_argument("--txt", default="runs_g2/covar.txt")
     ap.add_argument("--tex", default="runs_g2/covar.tex")
+    ap.add_argument("--fixband", type=int, default=0,
+                    help="固定带宽 W：ΔD ~ U[d, d+W]。0 = 用 dd_band(d)")
+    ap.add_argument("--rows", type=int, nargs="+", default=R_OLDS)
+    ap.add_argument("--cols", type=int, nargs="+", default=DDS)
     a = ap.parse_args()
 
     spec = LangSpec(n_values=a.n_values, n_entities=a.n_entities)
     vocab = Vocab(spec)
     rows = []
-    for r, d in itertools.product(R_OLDS, DDS):
-        cfg = mk_cfg(r, d)
+    for r, d in itertools.product(a.rows, a.cols):
+        cfg = mk_cfg(r, d, fixw=a.fixband)
         validate_cfg(cfg, spec)
         docs = list(generate_corpus(vocab, cfg, a.docs, seed_offset=1))
         m = measure(docs, spec)
-        lo, hi = dd_band(d)
+        lo, hi = band_of(d, a.fixband)
         m.update(r_old=r, dd=d, dd_lo=lo, dd_hi=hi,
                  posCeil=1.0 / (hi - lo + 1))
         rows.append(m)

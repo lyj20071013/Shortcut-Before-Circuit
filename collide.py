@@ -15,6 +15,10 @@ from vocab import Vocab
 R_OLDS = [3, 5, 8, 12, 16]
 DDS = [2, 3, 5, 8, 16]
 
+def band_of(d, fixw=0):
+    """fixw>0: 固定宽度带 [d, d+fixw]，切断 posCeil 与 ΔD 的共线。
+    fixw=0: 主网格的 dd_band(d)，宽度随 d 增长。"""
+    return (d, d + fixw) if fixw else dd_band(d)
 
 def q_stmts(d):
     """查询 slot 的语句下标，按文档顺序。"""
@@ -54,6 +58,10 @@ def main():
     ap.add_argument("--n-values", type=int, default=512)
     ap.add_argument("--n-entities", type=int, default=200)
     ap.add_argument("--out", default="collide")
+    ap.add_argument("--fixband", type=int, default=0,
+                    help="固定带宽 W：ΔD ~ U[d, d+W]。0 = 用 dd_band(d)")
+    ap.add_argument("--rows", type=int, nargs="+", default=R_OLDS)
+    ap.add_argument("--cols", type=int, nargs="+", default=DDS)
     a = ap.parse_args()
 
     spec = LangSpec(n_values=a.n_values, n_entities=a.n_entities)
@@ -62,9 +70,9 @@ def main():
              "global_last_update", "last_token", "positional"]
     rows = []
 
-    for r in R_OLDS:
-        for dd in DDS:
-            lo, hi = dd_band(dd)
+    for r in a.rows:
+        for dd in a.cols:
+            lo, hi = band_of(dd, a.fixband)
             cfg = CorpusCfg(name=f"R{r}_D{dd}", seed=0, p_update=0.5,
                             max_updates=1, r_old_lo=r, r_old_hi=r,
                             use_marker=False, delta_d_lo=lo, delta_d_hi=hi,
