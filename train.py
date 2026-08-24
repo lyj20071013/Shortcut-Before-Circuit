@@ -530,6 +530,15 @@ def main():
                     help="逗号分隔的步号，在这些步存 fp32 checkpoint")
     ap.add_argument("--ckpt-every", type=int, default=0,
                     help="每 N 步存一个 fp32 checkpoint（与 --ckpt-steps 取并集）")
+    # p_update 臂：固定长度下改 slot 数。填充 slot 的期望语句数是
+    # (1+p_update·R_old)/(1+spread)，故固定 n_stmts 时 p_update 是 slot 数的
+    # 唯一旋钮 —— 缩短文档会同时动长度，这是 app:slotmatch 结尾点名未解决的。
+    # 被查询 slot 走 _build_slot(force_update=True)，不读此参数，故它只动
+    # 填充侧：slot 数移动而 q_gap（copy dispersion）由 R_old 定死不动。
+    # ρ = p/(1+p·R_old) 对 p 近乎不敏感（R8 下 0.5→0.9 只让 ρ 从 0.100 到
+    # 0.110），故 tail0 这个协变量基本不受影响。
+    ap.add_argument("--p-update", type=float, default=0.5,
+                    help="填充 slot 收到 update 的概率。主网格恒为 0.5")
     a = ap.parse_args()          # <- 必须在所有 add_argument 之后
 
     over = {k: v for k, v in
@@ -562,9 +571,18 @@ def main():
         mkw["qk_norm_gain"] = a.qk_gain
     
     corpus = CorpusCfg(name=f"R{a.r}_D{a.d}_s{a.seed}", seed=a.seed,
-                       p_update=0.5, max_updates=1,
+                       p_update=a.p_update, max_updates=1,
                        r_old_lo=a.r, r_old_hi=a.r, use_marker=False,
                        delta_d_lo=dlo, delta_d_hi=dhi, p_hist_query=0.0, **ckw)
+    if a.p_update != 0.5:
+        if not a.tag:
+            ap.error("--p-update 偏离主网格时必须给 --tag："
+                     "tag 只由 R/D/seed 构成，会与主网格 run 同名互相覆盖")
+        rho = a.p_update / (1.0 + a.p_update * a.r)
+        rho0 = 0.5 / (1.0 + 0.5 * a.r)
+        print(f"[pupd] p_update={a.p_update}  ρ={rho:.3f}（主网格 {rho0:.3f}）"
+              f"  期望语句/slot="
+              f"{(1 + a.p_update * a.r) / (1 + corpus.spread):.2f}")
     tc = TrainCfg(total_steps=a.steps, batch_docs=a.batch, lr=a.lr, seed=a.seed,
               sched=a.sched, wd=a.wd, num_workers=a.workers, out_dir=a.out,
               eval_docs=a.eval_docs, eval_every=a.eval_every,

@@ -58,6 +58,17 @@ for s, dirp in zip(a.seeds, dirs):
             decay_wins = decay is not None and pk[1] is not None and decay > pk[1]
             pre = [t for t in R["probes"] if R["esc"] and t[0] < R["esc"]]
             post = [t[1] for t in R["probes"] if R["esc"] and t[0] >= R["esc"]]
+            # 前后半 sd。ddof=1 与 postSD 同口径；<6 点不报。
+            if len(post) >= 6:
+                h = len(post) // 2
+                sd_e = float(np.std(post[:h], ddof=1))
+                sd_l = float(np.std(post[h:], ddof=1))
+                ratio = sd_l / sd_e if sd_e > 0 else None
+            else:
+                sd_e = sd_l = ratio = None
+            # post-formation 点集的另一种定义，用来定 app:drift 的口径
+            post_x = [t[1] for t in R["probes"] if R["esc"] and t[0] > R["esc"]]
+
             rows.append(dict(s=s, r=r, d=d, gate=R["esc"], peak=pk[0], h=pk[1],
                              runner=runner, decay=decay, edge=at_edge,
                              dwin=decay_wins,
@@ -65,13 +76,18 @@ for s, dirp in zip(a.seeds, dirs):
                              term=R["probes"][-1][1] if R["probes"] else None,
                              n_post=len(post),
                              post_sd=(float(np.std(post, ddof=1))
-                                      if len(post) >= 5 else None)))
+                                      if len(post) >= 5 else None)),         
+                             sd_e=sd_e, sd_l=sd_l, ratio=ratio,
+                             post_sd0=(float(np.std(post))
+                                       if len(post) >= 5 else None),
+                             post_sdx=(float(np.std(post_x, ddof=1))
+                                       if len(post_x) >= 5 else None))
 
 def f(v, w, p=2):
     return "-".rjust(w) if v is None else f"{v:{w}.{p}f}"
 
 print("\ns  R  dD  gate   peak      h  runner  decay  flag  preFrac"
-      "   term  nPost  postSD")
+      "   term  nPost  postSD    sdE    sdL    L/E")
 for o in rows:
     flag = ("EDGE" if o["edge"] else "") + ("*" if o["dwin"] else "")
     print(f"{o['s']:<3}{o['r']:<3}{o['d']:<4}{str(o['gate']):>5}"
@@ -89,8 +105,8 @@ for s in a.seeds:
         pk = f"{np.mean([o['peak'] for o in v]):.0f}" if v else "-"
         pc = f"{np.mean([o['peak'] for o in cl]):.0f}" if cl else "-"
         gt = ([o["gate"] for o in v if o["gate"]])
-        print(f"  R{r:<3} peak {pk:>7} (clean {pc:>7}, n={len(cl)})"
-              f"   gate {np.mean(gt):.0f}" if gt else "")
+        g = f"   gate {np.mean(gt):.0f}" if gt else ""
+        print(f"  R{r:<3} peak {pk:>7} (clean {pc:>7}, n={len(cl)}){g}")
 
 print("\n=== 跨 seed 的行区间（剔除 EDGE 后），检验层级是否重叠 ===")
 for r in a.rows:
@@ -109,4 +125,36 @@ print(f"of the {len(lo20)} below 0.20, "
 sd = [o["post_sd"] for o in rows if o["post_sd"] is not None]
 if sd:
     print(f"within-run sd over {len(sd)} runs: {min(sd):.3f}-{max(sd):.3f}, "
-          f"median {np.median(sd):.3f}")
+          f"median {np.median(sd):.3f}"          
+          f"{f(o['post_sd'],8,3)}{f(o['sd_e'],7,3)}{f(o['sd_l'],7,3)}"
+          f"{f(o['ratio'],7,2)}")
+
+    
+print("\n=== 组内 sd：三种口径，用来定 app:drift 的端点 ===")
+for name, key in (("post_sd  >=esc ddof=1", "post_sd"),
+                  ("post_sd  >=esc ddof=0", "post_sd0"),
+                  ("post_sd  > esc ddof=1", "post_sdx")):
+    v = [(o[key], o) for o in rows if o.get(key) is not None]
+    if v:
+        vals = [x for x, _ in v]
+        hi = max(v, key=lambda t: t[0])[1]
+        print(f"  {name:<22} {min(vals):.3f}-{max(vals):.3f}"
+              f"  median {np.median(vals):.3f}"
+              f"  max at R{hi['r']}_D{hi['d']}_s{hi['s']}  (n={len(vals)})")
+
+print("\n=== sd 是否随训练推进而收缩 ===")
+rr = [o["ratio"] for o in rows if o.get("ratio") is not None]
+if not rr:
+    print("  没有 run 满足 nPost>=6")
+else:
+    shrink = sum(1 for x in rr if x < 1)
+    print(f"  {len(rr)} run 可测。晚<早 的 {shrink} 个 "
+          f"({shrink/len(rr):.0%})，比值中位数 {np.median(rr):.2f}")
+    try:
+        from scipy.stats import wilcoxon
+        st, p = wilcoxon(np.array(rr) - 1.0, alternative="less")
+        print(f"  Wilcoxon(晚<早 单侧): p = {p:.3g}")
+        print("  => 显著收缩，收敛解释站得住" if p < 0.05
+              else "  => 无显著收缩，收敛解释被削弱")
+    except ImportError:
+        print("  (装 scipy 出检验)")
