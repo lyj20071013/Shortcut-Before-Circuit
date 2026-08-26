@@ -297,7 +297,7 @@ def report(rows: List[dict]) -> str:
         f"{'tag':<22} {'R':>3} {'ΔD':>3} {'band':>7} {'state':>7} {'esc':>6} "
         f"{'acc':>6} {'copy':>6} {'yld':>5} {'n':>4} {'med':>8} "
         f"{'IQR':>16} {'frac+':>6} {'p':>8} {'mean':>8} {'trim':>8} "
-        f"{'mass':>6} {'mOK':>5} {'ctrl':>8} {'kSpl':>5} "
+        f"{'mass':>6} {'mOK':>5} {'ctrlMed':>8} {'ctrlAvg':>8} {'kSpl':>5} "
 f"{'medHi':>7} {'medLo':>7}"]
     for r in rows:
         band = f"[{r['dd_lo']},{r['dd_hi']}]" 
@@ -309,7 +309,8 @@ f"{'medHi':>7} {'medLo':>7}"]
             f"{r['d_median']:>+8.3f} {iqr:>16} {r['frac_positive']:>6.2f} "
             f"{r['sign_p']:>8.1e} {r['d_margin']:>+8.3f} "
             f"{r['d_trim05']:>+8.3f} {r['mass']:>6.2f} "
-            f"{r['frac_mass_ok']:>5.2f} {r['ctrl_margin']:>+8.3f}"
+            f"{r['frac_mass_ok']:>5.2f} {r['ctrl_median']:>+8.3f} "
+            f"{r['ctrl_margin']:>+8.3f} "
             f"{r.get('k_split', 0):>5.1f} "
             f"{r.get('d_med_hiK', NAN):>+7.3f} "
             f"{r.get('d_med_loK', NAN):>+7.3f}")
@@ -367,12 +368,12 @@ f"{'medHi':>7} {'medLo':>7}"]
         "state=retr 才可用：pos 态无检索回路、Δ 是位置规则副产物、方向恒为负。",
         "p 是符号的精确二项检验（双侧）；p>0.05 即方向不成立，不论均值多大。",
         "mOK 是逐篇 mass≥0.5 的比例；格均值达标但 mOK 低说明尾部文档已散掉。",
-        "|ctrl| 应远小于 |med|。跨格有梯度才算方向成立，单格绝对值不构成结论。"]
+        "|ctrl| 应远小于 |med|。跨格有梯度才算方向成立，单格绝对值不构成结论。"
+        "medHi/medLo 是格内按逐篇 Rreal 中位数分层的两半。两者同向且差异与",
+        "跨格方向一致 → R_old 通过统计起作用；两者无差异 → 跨格效应来自",
+        "edit domain 的文档选择偏置（R3/D16 的 domain 0.66 vs R16 的 1.00）。",]
     lines += ([""] + ["注意：" + b for b in bad]) if bad else ["", "无异常。"]
     return "\n".join(lines)
-"medHi/medLo 是格内按逐篇 Rreal 中位数分层的两半。两者同向且差异与",
-"跨格方向一致 → R_old 通过统计起作用；两者无差异 → 跨格效应来自",
-"edit domain 的文档选择偏置（R3/D16 的 domain 0.66 vs R16 的 1.00）。",
 
 
 
