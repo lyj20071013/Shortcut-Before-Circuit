@@ -770,12 +770,14 @@ current.
 ## 📜 Citation
 
 ```bibtex
-@article{liao2026shortcut,
-  title   = {Shortcut Before Circuit: Document Statistics Time In-Context
-             Conflict Resolution},
-  author  = {Liao, Yijun and Liang, Fanwei},
-  journal = {arXiv preprint arXiv:2608.24460},
-  year    = {2026}
+@misc{liao2026shortcut,
+      title={Shortcut Before Circuit: Document Statistics Time In-Context Conflict Resolution}, 
+      author={Liao, Yijun and Liang, Fanwei},
+      year={2026},
+      eprint={2608.24460},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2608.24460}
 }
 ```
 
