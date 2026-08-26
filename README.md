@@ -781,18 +781,8 @@ current.
 
 ## 📄 License
 
-> [!WARNING]
-> An earlier version of this README displayed an Apache-2.0 badge, but no `LICENSE` file has
-> been committed. Until one is, public visibility does not by itself grant permission to
-> copy, modify, or redistribute this code. Either commit `LICENSE` (Apache-2.0 matches the
-> badge that was previously shown) or drop the claim — the two should not disagree.
-
-Once `LICENSE` is committed, replace this block with:
-
-```markdown
 Released under the Apache License 2.0. See [`LICENSE`](LICENSE).
 Copyright 2026 Yijun Liao and Fanwei Liang.
-```
 
 The paper itself is separately licensed: the arXiv record is posted under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), which covers `paper.pdf` and not
