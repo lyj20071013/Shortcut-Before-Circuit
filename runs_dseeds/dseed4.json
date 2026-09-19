@@ -1,0 +1,57 @@
+{
+ "at": 16000,
+ "late_lo": 8000,
+ "runs": [
+  {
+   "path": "R3_D8_s0_dseed0.jsonl",
+   "data_seed": 0,
+   "init_seed": 0,
+   "corpus_name": "R3_D8_s0",
+   "frac_at": 0.09433962264150944,
+   "marg_at": -0.07549041997465238,
+   "mass_at": 0.9985972349374724,
+   "n_late": 5,
+   "band_late": 0.11949685534591195,
+   "n_probe": 14
+  },
+  {
+   "path": "R3_D8_s0_dseed100.jsonl",
+   "data_seed": 100,
+   "init_seed": 0,
+   "corpus_name": "R3_D8_s0",
+   "frac_at": 0.2085889570552147,
+   "marg_at": -0.576582876278696,
+   "mass_at": 0.9991760704612982,
+   "n_late": 5,
+   "band_late": 0.08588957055214723,
+   "n_probe": 14
+  },
+  {
+   "path": "R3_D8_s0_dseed101.jsonl",
+   "data_seed": 101,
+   "init_seed": 0,
+   "corpus_name": "R3_D8_s0",
+   "frac_at": 0.6820809248554913,
+   "marg_at": 0.010887302129227948,
+   "mass_at": 0.9964971758832094,
+   "n_late": 5,
+   "band_late": 0.12716763005780352,
+   "n_probe": 14
+  },
+  {
+   "path": "R3_D8_s0_dseed102.jsonl",
+   "data_seed": 102,
+   "init_seed": 0,
+   "corpus_name": "R3_D8_s0",
+   "frac_at": 0.6467065868263473,
+   "marg_at": 0.017879895200885967,
+   "mass_at": 0.9965667196169853,
+   "n_late": 5,
+   "band_late": 0.07784431137724546,
+   "n_probe": 14
+  }
+ ],
+ "sd_frac": 0.30013817050701685,
+ "range_frac": 0.5877413022139819,
+ "n": 4
+}
