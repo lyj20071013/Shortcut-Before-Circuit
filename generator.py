@@ -1,15 +1,4 @@
-"""文档采样。核心不变量：
-1. 每篇文档重新采样 (e,a)->v 绑定（杀参数化记忆）
-2. ΔD 精确成立且分布非退化（见 config.dd_band：ΔD 恒定即完美位置捷径）
-3. 文档内值 id 不重复，答案值只出现一次（消除 recency 捷径的偶然可达）
-4. update 位置严格均匀，不随 R_old 向文档末尾聚集
-5. q_slot 与填充 slot 的局部结构同分布：老值散布宽度、update 前驱是否同 slot
-   两项都不得区分二者，否则可绕过 query 定位答案
-
-刻意不做的事：不强制尾部存在其他 update。tail_upd=(1-ρ)^ΔD 随两轴变化是
-设计的内在性质，ρ=p_update/(1+p_update·R_old)。要清除的只有 100% 可解的
-完美捷径，不完美捷径的可用性正是本文的自变量，须测量而非归零。
-"""
+"""Generate controlled assignment-language documents."""
 import random
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
@@ -54,6 +43,14 @@ class Doc:
     q_clamped: bool             # 回退到 clamp 放置（应 ≪1%，越界诊断用）
     q_kept: int                 # 实际进文档的 q_old 条数（越界丢弃后），realized R_old
     stmts: List[Stmt]           # 组装后的语句序列，探针据此做最小编辑
+    # ---- 旋钮 6（p_break）。默认值让旧数据反序列化后语义不变 ----
+    is_break: bool = False      # 本篇被查询 slot 的多重性是否被反转
+    answer_val_id: int = -1     # 标签的 raw value id。N+ 的反转文档上它是老值，
+                                # 与 val_history[-1] 不同，probe._answer_val 据此
+                                # 取值而非从 val_history 反推。-1 表示旧数据。
+    n_old_kept: int = 0         # q slot 内老值实际进文档的份数（越界丢弃后）
+    n_new_kept: int = 0         # 同上，末代值。N− 的反转文档上标签在前缀出现
+                                # 这么多次，selfcheck 第 3 条据此分层给期望值。
 
 
 class _ValueDraw:
@@ -86,17 +83,45 @@ class _ValueDraw:
 
 
 def _build_slot(rng: random.Random, cfg: CorpusCfg, ent: int, attr: int,
-                force_update: bool, draw: _ValueDraw
+                force_update: bool, draw: _ValueDraw,
+                reps_old: Optional[int] = None, reps_final: int = 1
                 ) -> Tuple[List[Stmt], List[int]]:
-    """返回该 slot 的语句序列（时序）与值历史。被取代的值重复 R_old 次。"""
+    """返回该 slot 的语句序列（时序）与值历史。默认被取代的值重复 R_old 次、
+    末代值 1 份，这就是式 1 的别名：counts={v_old:R, v_new:1}，argmin count 与
+    argmax pos 同指末代值。
+
+    reps_old / reps_final 非默认时反转这个多重性（旋钮 6）。两处细节：
+
+    last>0 的守卫：无 update 的填充 slot 只有一代值，它既是首代也是末代。
+    若让它吃 reps_final，单例填充 slot 会被撑成 R 份，slot 数分布随 p_break
+    变化；slot 数本身也是需要记录的格间协变量。
+
+    is_update 的非对称不可避免：标记按世代打（i>0），整代重复 reps 次，故反转
+    slot 有 R 条 update 而常规 slot 只有 1 条。想只标末代第一份的话 flags 会是
+    [F,T,F,...]，违反 _order_ok 的单调不减，而 probe_selfcheck 断言 _order_ok
+    必须放过所有 base 文档。因此 validate_cfg 在 p_break>0 时禁 use_marker
+    （否则 UPD token 数泄漏 is_break），诊断侧则须按 is_break 分层统计
+    update 密度，池化会报假阳性。
+
+    RNG：reps_old 给定时跳过 randint（即便 r_old_lo==r_old_hi 它也消耗随机数），
+    故反转文档与常规文档的流不同步。这不影响任何要求 —— p_break=0 时无反转
+    文档、流与主网格逐比特相同；N+ 与 N− 在同 seed 下走的是同一条分支序列，
+    前缀仍逐比特相同。
+    """
     if force_update:
         n_upd = rng.randint(1, cfg.max_updates)
     else:
         n_upd = rng.randint(1, cfg.max_updates) if rng.random() < cfg.p_update else 0
     history = draw.take(n_upd + 1)
     stmts = []
+    last = len(history) - 1
     for i, v in enumerate(history):
-        reps = 1 if i == len(history) - 1 else rng.randint(cfg.r_old_lo, cfg.r_old_hi)
+        if i == last:
+            reps = reps_final if last > 0 else 1
+        elif reps_old is not None:
+            reps = reps_old
+        else:
+            reps = rng.randint(cfg.r_old_lo, cfg.r_old_hi)
         for _ in range(reps):
             stmts.append(Stmt(ent, attr, v, is_update=(i > 0)))
     return stmts, history
@@ -172,7 +197,23 @@ def sample_document(vocab: Vocab, cfg: CorpusCfg, rng: random.Random) -> Doc:
 
     used: set = set()
     q_ent, q_attr = _fresh_pair(rng, spec, used)
-    q_stmts, q_history = _build_slot(rng, cfg, q_ent, q_attr, True, draw)
+    rb = cfg.r_new_break or cfg.r_old_hi
+    # is_break 在 q slot 之前抽。truth_rule 完全不消耗随机数，故同 seed 下
+    # N+ 与 N− 的 is_break 序列相同、_build_slot 的实参相同、token 前缀逐比特
+    # 相同，两条 arm 只在反转文档的标签 token 上不同。这是整个设计的地基
+    # （见 pair 断言脚本）：探针只读 tokens[:answer_pos]，故两条 arm 的探针
+    # 输入分布严格相同，读数差异只能来自目标函数。
+    # p_break=0 时短路求值不调用 rng.random()，流与已发表的主网格逐比特一致。
+    is_break = cfg.p_break > 0.0 and rng.random() < cfg.p_break
+    if is_break:
+        q_stmts, q_history = _build_slot(rng, cfg, q_ent, q_attr, True, draw,
+                                         reps_old=cfg.k_old_break, reps_final=rb)
+    else:
+        q_stmts, q_history = _build_slot(rng, cfg, q_ent, q_attr, True, draw)
+    # 反转 slot 是 [老值×k, 末代值×rb]，故 q_stmts[-1] 仍是末代值（钉在
+    # p_final），而 q_old 变成 [老值×k, 末代值×(rb-1)] —— 窗口里混有末代值的
+    # 副本。这正是别名被破除的形态：counts={老值:k, 末代值:rb}，argmin count
+    # 指向老值而 argmax pos 仍指向末代值。
     q_final, q_old = q_stmts[-1], q_stmts[:-1]
     assert p_final >= len(q_old), (n_stmts, len(q_old), delta_d)
 
@@ -188,7 +229,16 @@ def sample_document(vocab: Vocab, cfg: CorpusCfg, rng: random.Random) -> Doc:
     while len(keyed) < need:
         for _ in range(max(1, int((need + 4 - len(keyed)) / exp_per_slot))):
             e, a = _fresh_pair(rng, spec, used)
-            s, _ = _build_slot(rng, cfg, e, a, False, draw)
+            # 填充 slot 必须以同一比率反转（不变量 6）。否则「末代值被重复」
+            # 就是定位被查询 slot 的完美判别式，模型无需读 query 即可答题。
+            # fb 在 _build_slot 之前抽，与它内部的 n_upd 独立，故「有 update 的
+            # slot 中被反转的比例」在两侧同为 p_break —— 无 update 的填充 slot
+            # 只有一代值，_build_slot 的 last>0 守卫让 reps_final 不生效，反转
+            # 对它是空操作，不进入这个比例的分母。
+            fb = cfg.p_break > 0.0 and rng.random() < cfg.p_break
+            s, _ = _build_slot(rng, cfg, e, a, False, draw,
+                               reps_old=cfg.k_old_break if fb else None,
+                               reps_final=rb if fb else 1)
             _keyed(s, rng, cfg.spread, keyed)
     keyed.sort(key=lambda t: t[0])
     del keyed[need:]        # 固定裁剪线，T 才不受批量生成过冲的影响
@@ -232,6 +282,23 @@ def sample_document(vocab: Vocab, cfg: CorpusCfg, rng: random.Random) -> Doc:
             seq[i] = next(it)
     assert seq[p_final] is q_final and all(s is not None for s in seq)
 
+    # ---- q slot 内两代值的实际存活份数（越界丢弃之后）----
+    # pairs 是 q_old 的存活者。常规文档它全是老值，故 n_new_kept 恒为 1
+    # （只有钉在 p_final 的那份）。反转文档的 q_old 混有末代值的副本，两个量
+    # 都要单独数：selfcheck 第 3 条用 n_new_kept 给 N− 的标签份数定期望值，
+    # covar 用两者之比检查不变量 6。
+    v_final = q_history[-1]
+    n_new_kept = sum(1 for _, st in pairs if st.val == v_final) + 1
+    n_old_kept = len(pairs) + 1 - n_new_kept
+    # N+ 的标签是老值，它若被越界丢弃则标签不在文档内、该篇无解。want 重试
+    # 循环（每个不同的老值至少留一份）与 clamp 回退（位置全非负故全存活）
+    # 已经保证这点，此处把隐式保证变显式 —— 反转文档的 want 有两个元素而
+    # 老值恰在 q_old[0]（拿最小的位置键，最易越界成负），比常规文档更吃紧。
+    if is_break and cfg.truth_rule == "rarity":
+        assert n_old_kept >= 1, (
+            f"反转文档的老值全部越界丢弃，N+ 的标签不在文档内 "
+            f"(n_stmts={n_stmts}, p_final={p_final}, w_st={w_st})")
+
     # ---- 查询类型 ----
     hist_k = None
     if cfg.p_hist_query > 0:
@@ -239,7 +306,15 @@ def sample_document(vocab: Vocab, cfg: CorpusCfg, rng: random.Random) -> Doc:
             hist_k = rng.randint(1, min(len(q_history) - 1, spec.n_time_idx - 1))
         else:
             hist_k = 0
-    answer_val = q_history[-1] if not hist_k else q_history[-1 - hist_k]
+    # 标签。truth_rule 只改这里一个已抽好的值，不消耗随机数 —— 这是 N+/N−
+    # 前缀逐比特相同的来源（见 is_break 处）。
+    # N+（rarity）在反转文档上标签是老值 q_history[-2]：反转 slot 的 counts 是
+    # {老值:k, 末代值:rb} 且 validate_cfg 强制 rb>k，故 argmin count 指向老值。
+    # 非反转文档上两条规则同指末代值（式 1），标签与主网格完全一致。
+    if cfg.truth_rule == "rarity" and is_break:
+        answer_val = q_history[-2]
+    else:
+        answer_val = q_history[-1] if not hist_k else q_history[-1 - hist_k]
 
 # ---- 发射 ----
     toks, answer_pos = emit(seq, q_ent, q_attr, hist_k, answer_val, vocab, cfg)
@@ -290,7 +365,9 @@ fill_gap_near=(sum(gaps_near) / len(gaps_near)) if gaps_near else float("nan"),
 adj_q=adj_q,
 adj_fill=(sum(adj) / len(adj)) if adj else float("nan"),
 w_st=w_st, fill_quint=fq, key_quint=kq,
-q_clamped=q_clamped, q_kept=len(pairs), stmts=list(seq))
+q_clamped=q_clamped, q_kept=len(pairs), stmts=list(seq),
+is_break=is_break, answer_val_id=answer_val,
+n_old_kept=n_old_kept, n_new_kept=n_new_kept)
 
 
         

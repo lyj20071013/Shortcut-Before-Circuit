@@ -1,12 +1,4 @@
-"""R3/D5 两个种子的几何对比。App flat 的 one-seed 限制靠这张表消掉。
-
-问题：读数方向相反（seed 0 frac+ 0.126 / seed 1 0.972）的两个 run，
-沿 u_perp 的平坦程度是否相同。若同量级 -> 平坦性是构造的性质，不是某个
-run 的偶然；若差一个数量级以上 -> 平坦性本身依赖终点，§5.6 要改写。
-
-只取索引 1 的 eps（第二小档）：最小档 dL 落在 fp32 ULP 附近，最大两档已离开
-线性区。逃逸前 checkpoint（mass≈0.004）标 * 并排除在结论之外。
-"""
+"""Compare saved exploratory geometry measurements across seeds."""
 import json
 import os
 import sys
@@ -88,8 +80,8 @@ def main():
     if ok:
         qs = [q for _, _, _, q in ok]
         print(f"\n比值范围 {min(qs):.2f}–{max(qs):.2f}（{len(qs)} 个 checkpoint）")
-        print("落在 0.1–10 内 => 同量级，one-seed 限制可以删掉。")
-        print("超出一个数量级 => 平坦程度依赖终点，§5.6 须改写。")
+        print("Ratios within 0.1-10 indicate the same order of magnitude for these endpoints.")
+        print("Larger ratios indicate endpoint sensitivity here; neither case establishes generality.")
 
 
 if __name__ == "__main__":

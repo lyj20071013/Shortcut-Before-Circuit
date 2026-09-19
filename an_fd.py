@@ -1,12 +1,4 @@
-"""平坦方向的有限差分测量。测 L 本身而不是 grad L。
-
-一阶版在收敛点不可用：那里 grad L 由填充 token 的不可约熵地板主导，
-真值 margin 也测不出对齐（cos 0.001 对地板 0.13）。这里改测：沿单位方向
-走 eps，Δ 移动多少、L 移动多少。固定 batch + 固定探针集 => 无采样噪声。
-
-三个方向：读数梯度、真值 margin 梯度、随机。关心的量是每单位 L 上升
-换来多少 Δ 位移 —— 平坦方向应该便宜得多。
-"""
+"""Exploratory finite-difference measurements requiring checkpoints."""
 import argparse, json, os, random
 import torch
 from config import CorpusCfg, LangSpec

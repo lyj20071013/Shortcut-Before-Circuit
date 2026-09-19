@@ -1,14 +1,5 @@
 
-"""slot 稀疏度臂的长度校准。
-
-R_old 与每篇文档的 slot 数共线（R3 是 27.6，R16 是 8.7），而 §7 把读数
-报成 (R_old, slot 数) 这个对的性质。打破共线的办法是缩短 R8 格的文档，
-让它的 slot 数匹配 R16，再看读数往哪边走。
-
-一个旋钮改两个协变量：slot 数按 n_stmts 单调，副本间距按
-spread * n_stmts / q_kept。两者要求的长度不同，所以这里两个都测，
-让长度的选择有据可依而不是猜。
-"""
+"""Generator calibration for slot-count matching."""
 import argparse, json
 
 from config import CorpusCfg, LangSpec, dd_band

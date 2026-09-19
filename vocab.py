@@ -1,4 +1,4 @@
-"""整数 token 直出，不经过 BPE。一个值 = 一个 token，是读答案分布的前提。"""
+"""Integer-token vocabulary for the assignment language."""
 from config import LangSpec
 
 

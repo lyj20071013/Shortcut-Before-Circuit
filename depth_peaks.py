@@ -1,13 +1,4 @@
-r"""深度臂的 loss 导数峰与格内 sd。只吃训练 jsonl，不需要 .pt。
-
-paper_numbers.py 按 R{r}_D{dd}_s{s}_grid.jsonl 匹配，认不出 _L4/_L12，
-所以单独一份。deriv / escape_peak / read_run 与 paper_numbers.py 逐行相同，
-否则两边的峰位不可比。
-
-用法:
-  python depth_peaks.py --dir ../runs_depth
-  python depth_peaks.py --dir ../runs_depth --tail-frac 0.8
-"""
+"""Summarize candidate peaks and trajectories in the depth arm."""
 import argparse
 import glob
 import json
@@ -74,7 +65,7 @@ def escape_peak(loss, tail_frac=0.8):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default="../runs_depth")
+    ap.add_argument("--dir", default="runs_depth")
     ap.add_argument("--tail-frac", type=float, default=0.8)
     a = ap.parse_args()
 
@@ -134,7 +125,7 @@ def main():
         print(f"median                              : {np.median(sds):.3f}")
         wk = max(rows, key=lambda r: r["sd"] if r["sd"] == r["sd"] else -1)
         print(f"largest at                          : {wk['tag']}")
-        print(f"  ^ 论文写 '0.007--0.332 over its twelve runs, largest at four layers'")
+        print(f"  ^ Archived reference: SD 0.007--0.332 over twelve runs, largest at four layers.")
 
 
 if __name__ == "__main__":

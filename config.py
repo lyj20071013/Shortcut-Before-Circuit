@@ -1,4 +1,4 @@
-"""受控合成语言的配置。所有随机性由 seed 控制。"""
+"""Dataclass definitions for the synthetic language and corpus."""
 from dataclasses import dataclass
 
 
@@ -19,7 +19,7 @@ class LangSpec:
 
 @dataclass(frozen=True)
 class CorpusCfg:
-    """五个数据侧旋钮 + 文档形状随机化参数。"""
+    """六个数据侧旋钮 + 文档形状随机化参数。"""
     name: str
     seed: int = 0
 
@@ -51,9 +51,60 @@ class CorpusCfg:
     min_slots: int = 4          # 文档内最少不同 slot 数，保证实体多样性
     spread: float = 0.80     # slot 局部窗口宽度 = 语句数 × spread
 
+    # 旋钮 6：别名破除。p_break 比例的文档把被查询 slot 的多重性反转成
+    # {老值: k_old_break, 末代值: r_new_break}，于是 rarity 指向老值、
+    # recency 指向末代值，式 1 的共延在这些文档上不成立。
+    # truth_rule 决定反转文档的标签，且不消耗随机数：同 seed 下 N+ 与 N− 的
+    # token 前缀逐比特相同，只有反转文档的标签 token 不同，故两条 arm 的读数
+    # 差异只能来自目标函数。
+    # p_break=0 且 truth_rule=recency 时 rng.random() 因短路求值不被调用，
+    # 该配置与主网格逐比特相同 —— 已发表 75 个 run 的可复现性不受影响，且
+    # N− 的剂量曲线在 p_break=0 处直接复用它们作为锚点。
+    p_break: float = 0.0
+    k_old_break: int = 1
+    r_new_break: int = 0          # 0 -> 取 r_old_hi，令反转 slot 语句数与常规相同
+    truth_rule: str = "recency"   # recency（N−，同任务对照）| rarity（N+，仪器正对照）
+
 def validate_cfg(cfg: CorpusCfg, spec: LangSpec) -> None:
     """配置期校验。宁可生成前炸掉，也不要在数据里留静默失真。"""
-    worst_q = cfg.max_updates * cfg.r_old_hi + 1
+    if cfg.truth_rule not in ("recency", "rarity"):
+        raise ValueError(f"[{cfg.name}] truth_rule 只能是 recency | rarity")
+    if not 0.0 <= cfg.p_break <= 1.0:
+        raise ValueError(f"[{cfg.name}] p_break 是比例，须在 [0,1]")
+    rb = cfg.r_new_break or cfg.r_old_hi
+    if cfg.p_break > 0.0:
+        if cfg.k_old_break < 1:
+            raise ValueError(f"[{cfg.name}] k_old_break 须 ≥1：老值全删则 N+ "
+                             f"的标签不在文档内")
+        if rb <= cfg.k_old_break:
+            raise ValueError(
+                f"[{cfg.name}] 需 r_new_break({rb}) > k_old_break"
+                f"({cfg.k_old_break})，否则 rarity 仍指向末代值，别名未破除")
+        if cfg.use_marker:
+            raise ValueError(
+                f"[{cfg.name}] break arm 不支持 use_marker：反转 slot 的 "
+                f"is_update 份数与常规 slot 不同（R 对 1，见 _order_ok 的单调性"
+                f"要求），UPD token 数会随 is_break 变化，构成完美判别式")
+        if cfg.p_hist_query > 0:
+            raise ValueError(
+                f"[{cfg.name}] break arm 不支持 hist 查询：@k 的真值是老值，"
+                f"与 truth_rule=rarity 的标签定义冲突")
+        if cfg.max_updates != 1:
+            raise ValueError(
+                f"[{cfg.name}] break arm 要求 max_updates=1：三代值下"
+                f"「反转」有多种含义，rarity 的指向不再唯一")
+    elif cfg.truth_rule == "rarity":
+        raise ValueError(
+            f"[{cfg.name}] p_break=0 时 rarity 与 recency 逐篇同指（式 1），"
+            f"truth_rule='rarity' 是静默空操作。N+ 必须配 p_break>0；"
+            f"剂量曲线的 p_break=0 锚点用 N−（truth_rule='recency'），"
+            f"它与主网格逐比特相同。")
+
+    # 反转 slot 的语句数 = k_old_break + rb。对称默认（k=1, rb=r_old_hi）下
+    # 它等于常规 slot 的 r_old_hi+1，长度约束不变；Stage C 的 k_old_break=2
+    # 会让它多 1，须由 n_stmts_lo 吸收。
+    q_break = (cfg.k_old_break + rb) if cfg.p_break > 0.0 else 0
+    worst_q = max(cfg.max_updates * cfg.r_old_hi + 1, q_break)
     need = worst_q + cfg.delta_d_hi + 4
     if cfg.n_stmts_lo < need:
         raise ValueError(
@@ -77,7 +128,9 @@ def validate_cfg(cfg: CorpusCfg, spec: LangSpec) -> None:
     if not 0.0 < cfg.spread <= 1.0:
         raise ValueError(f"[{cfg.name}] spread 是占全文比例，须在 (0,1]")
 
-    q_len = cfg.max_updates * cfg.r_old_hi
+    # 反转 slot 的 q_old 是 [老值×k_old_break, 末代值×(rb-1)]，共 q_break-1 条，
+    # 与常规 slot 同走一个窗口，故窗口宽度检查取两者最坏。
+    q_len = max(cfg.max_updates * cfg.r_old_hi, q_break - 1)
     if cfg.spread * cfg.n_stmts_lo < 2 * q_len:
         raise ValueError(
         f"[{cfg.name}] spread×n_stmts_lo={cfg.spread * cfg.n_stmts_lo:.0f} "
@@ -97,9 +150,9 @@ def dd_band(d: int, rel: float = 0.5) -> tuple:
     return lo, hi
 
 
-# 阶段 1 的两个极端配置。生死门只跑这两个。
-# 注意：两者在 4 个旋钮上同时不同，arm 间差异不可归因到任何单一旋钮。
-# 这里只用于验证"两端确实学到不同规则"，归因靠相图。
+# Legacy pilot configurations differ on four controls at once.
+# Differences between these arms cannot be assigned to any single control.
+# Use these for pipeline diagnostics, not identification of a learned rule.
 EXTREME_A = CorpusCfg(
     name="freq_marked",
     p_update=0.9, r_old_lo=1, r_old_hi=2,

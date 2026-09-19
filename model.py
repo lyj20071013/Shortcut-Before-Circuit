@@ -1,30 +1,4 @@
-"""Decoder-only Transformer。25–51M 参数区间，单卡 90 run。
-
-四个实质性设计选择，须在正文声明：
-
-位置编码用 RoPE，不用 learned absolute。候选规则里有 position（复制固定
-token 偏移处的值），而位置编码的选择直接决定这条规则有多容易学：learned
-absolute 让模型能直接索引绝对位置，会人为抬高 position 的占比；RoPE 把
-相对距离作为归纳偏置，而 ΔD 本身就是相对量。压制或抬高任一候选规则都会
-让相图偏向伪结论，RoPE 是与自变量匹配且贴近现代 LM 实际配置的一侧。
-附录应在少数格子上用 learned absolute 复跑作稳健性检查。
-
-不 tie embedding。unembedding 独立是回路归因（§7）的前提：tied 时
-"读入某 value" 与 "写出某 value" 共用同一方向，logit attribution 无法区分
-搬运与生成。代价是多 2M 参数，可以接受。
-
-无 dropout：语料是无限流式生成，每篇文档重新采样 (e,a)->v 绑定，
-过拟合的对象不存在，dropout 只会拖慢收敛并给激活归因引入噪声。
-
-QK-norm（q/k 各一个 per-head RMSNorm）。固定 init_std 在 d_model=256
-下让 attn logit 起步 std ≈ 0.1，softmax 近乎均匀、梯度稀薄，induction
-回路形成慢一个数量级（见 bench 的 1key）。QK-norm 把起步 logit 钉在
-~1.0 且给出上界，不需要 soft cap。这是对所有格子一致施加的结构选择，
-不与自变量交互；附录用 --no-qk-norm 在少数格子复跑。
-
-初始化尺度随宽度走：std = 1/sqrt(d_model)，而非固定 0.02。残差写出
-路径（attn.out / mlp.down）额外乘 1/sqrt(2·n_layer)。
-"""
+"""Decoder-only Transformer with RoPE, RMS normalization, and SwiGLU."""
 import math
 from dataclasses import dataclass
 from typing import Optional
@@ -226,7 +200,7 @@ class LM(nn.Module):
     def param_groups(self, wd: float):
         """embedding 不做 weight decay：稀疏梯度下逐步衰减所有行，与小初始化
         叠加会把 token 身份继续压小。tie_embed 时 head 与 emb 同一张量，
-        自动落入 nodecay（这一差异只出现在 tie 消融里，须在附录声明）。"""
+        自动落入 nodecay；这个优化器分组差异属于 tie 消融的配置。"""
         no_wd = {id(self.emb.weight)}
         if self.wpe is not None:
             no_wd.add(id(self.wpe.weight))

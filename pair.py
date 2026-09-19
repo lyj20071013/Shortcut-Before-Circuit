@@ -1,13 +1,5 @@
 
-"""slot 稀疏度臂的配对读数。
-
-校准把 slot 数（14.59 -> 8.95）和副本间距（6.87 -> 4.71）都匹配到了
-R16/D2，但代价是实际冗余度从 5.75 掉到 4.02。§5.4 已证效应随实际冗余度
-放大，所以整格对比分不开「slot 数变了」和「冗余度变了」。
-
-解法：取两格 q_kept 分布的重叠带，band 内 R_old 与实际冗余度一致，
-只有 slot 数不同。整格读数也报，但结论落在配对子集上。
-"""
+"""Summarize matched subsets from per-document records."""
 import argparse, json, math
 
 DELTA_KEYS = ["delta", "d_logodds", "dlogodds", "logodds_delta",

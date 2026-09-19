@@ -1,37 +1,4 @@
-"""规则归因探针。两条读数路径互相独立，都不依赖模型内部结构。
-
-A 观测归因 attribute()：6 条候选规则各出预测，与模型预测比对。主读数是
-  rate_disc —— 只在"该规则与真值预测不同"的子集上算。全集上算的话，
-  跟踪型模型在所有规则上都拿高分，相图会一片红。identifiability() 报告
-  规则两两碰撞率：R_old=1 时 frequency 与 last_value 恒同预测、R_old≥2 时
-  frequency 与 primacy 恒同预测，碰撞的那一对在该格不可分离，
-  任何该规则的结论必须与碰撞率并列报告。
-
-B 因果探针 causal()：同一篇 base 文档做最小编辑，只移动一条候选规则的预测，
-  真值恒不变。读数 Δ = [logp(v*)-logp(truth)]_edit - [同]_base。
-
-  v* 是固定的对照值，两侧同一对候选。判定条件（apply_edit 统一强制）：
-    目标规则在 base 与 edit 的预测必须不同（rb != re）；
-    sign=+1 取 v*=re，sign=-1 取 v*=rb；
-    v* 在两侧都不等于真值。
-  于是规则型模型 Δ = sign·2·sharp，跟踪型模型 Δ = 0，与规则是否碰巧
-  撞上真值无关。早期版本按各自规则预测取值、并在 rb==truth 时短路返回 0，
-  Δ 混进了"候选对是否退化"这个纯结构变化，跟踪型模型也读出 -sharp。
-
-  编辑成对出现，域互补：bump_freq 只在 R_real=1 有域（老值已占多数时
-  加一份不改 argmax），drop_freq 只在 R_real≥2 有域；late_update 需要尾部
-  本无 update（低 ΔD），clear_late_update 需要尾部有 update（高 ΔD）。
-  并集覆盖整条轴。域为空不是错误，打印"域太小"并跳过读数。
-
-硬约束：编辑后 token 数、answer_pos、真值、语句数、q_gap 全不变，否则长度或
-结构本身泄漏了编辑。shift_delta 为守 q_gap 必须配对搬移最近的 q_old：
-只搬 q_final 会让 ΔD 与 q_gap 反向同步变化，构成 off-manifold 组合。
-contamination() 报告每条编辑连带移动了哪些非目标规则。
-
-不支持 hist 查询（q_hist_k≥1 时真值是老值，last_value 的定义要换）。
-marked 配置下增删 update 会动 UPD token 破坏长度不变，故 late_update 系列
-在 use_marker=True 时返回 None；相图主体全是 unmarked，不阻塞。
-"""
+"""Candidate rules, answer-preserving edits, and intervention measurements."""
 import random
 from collections import Counter
 from dataclasses import dataclass
@@ -58,6 +25,23 @@ RULE_NAMES = [TRUTH, "primacy", "frequency", "rarity",
 # 恒为 1），n_disc 恒为 0、rate_disc 为 nan，dominant_rule 不会选中它。
 # 主相图的 DV 改用 break_rarity 的因果读数，见模块 docstring。
 MAIN_GRID_EXCLUDE = frozenset({"frequency", "rarity"})
+
+
+def grid_exclude(cfg: CorpusCfg) -> frozenset:
+    """该配置下应从观测归因中排除的规则。
+
+    主网格（p_break=0）排除 rarity：式 1 让它与 last_value 逐篇同指，n_disc
+    恒为 0、rate_disc 为 nan。旋钮 6 打开后反转文档上二者分歧，n_disc>0，
+    rarity 第一次在观测路径上有信号 —— 这是与因果探针独立的第二个仪器，
+    必须放回，否则 arm 白跑了一半。
+
+    frequency 恒排除：max_updates=1 下它是 last_value（Rreal=1）或 primacy
+    （Rreal≥2）的恒等式，与 p_break 无关。反转文档上 counts 互换，frequency
+    指向末代值、仍与 last_value 重合，所以打开 p_break 也救不了它。
+    """
+    if getattr(cfg, "p_break", 0.0) > 0.0:
+        return frozenset({"frequency"})
+    return MAIN_GRID_EXCLUDE
 
 YIELD_MIN = 0.05        # 域小于此值：该格该编辑不出因果读数（不是错误）
 CONTAM_WARN = 0.02      # 非目标规则被连带移动的比例，超过则打印警告
@@ -108,6 +92,16 @@ def _q_gap(d) -> int:
 
 
 def _answer_val(d: Doc) -> int:
+    """标签的 raw value id。
+
+    反转文档（is_break，旋钮 6）在 truth_rule=rarity 下标签是老值，从
+    val_history[-1] 反推会得到末代值，进而让 apply_edit 造出"真值被改"的
+    编辑文档，probe_selfcheck 的 ed.answer == d.answer 立刻失败。故一律以
+    生成器记下的 answer_val_id 为准；hist 分支保留作旧数据（无该字段）回退。
+    """
+    v = getattr(d, "answer_val_id", -1)
+    if v >= 0:
+        return v
     k = d.q_hist_k
     return d.val_history[-1] if not k else d.val_history[-1 - k]
 
@@ -440,12 +434,25 @@ def _edit_break_rarity(d: Doc, cfg, spec, rng):
     """
     if cfg.use_marker:
         return None
+    if getattr(d, "is_break", False):
+        # 反转文档的多重性已是 [老值×k, 末代值×rb]，再反转一次没有定义，且它
+        # 只有 k=1 份老值故 olds 恒不足。显式返回 None 而不依赖下面的
+        # len(olds)<2 静默退出 —— 后者会让「arm 上读数为空」看起来像
+        # 「效应不存在」。读数一律只在非反转文档上做，见 go_nogo。
+        return None
     p = _p_final(d)
     qp = _q_pos(d)
     if len(qp) < 3:
         return None
-    v_old = d.stmts[qp[-2]].val
-    v_new = d.stmts[p].val
+    # 按世代取老值，不按位置。qp[-2] 隐含假定末代值恰 1 份：这在主网格成立
+    # （reps_final=1），但旋钮 6 下反转 slot 的 qp[-2] 会落在末代值的副本上，
+    # 于是 v_old==v_new、函数静默返回 None。val_history 是世代记录，与 reps
+    # 无关，两种文档上都正确。
+    # p_break=0 时二者恒等，故此改动对已发表数据是严格 no-op：拿已发表的
+    # checkpoint 重跑 go_nogo 必须逐位复现原表，这是免费的回归门。
+    if len(d.val_history) < 2:
+        return None
+    v_old, v_new = d.val_history[-2], d.val_history[-1]
     if v_old == v_new:
         return None
     olds = [i for i in qp if i != p and d.stmts[i].val == v_old]
@@ -481,6 +488,43 @@ def _edit_break_rarity_ctrl(d: Doc, cfg, spec, rng):
     for i in firsts[1:]:
         new[i] = Stmt(e, a, v_last, True)
     return new, d.realized_delta
+
+class _View:
+    """predictor 只读 tokens[:answer_pos]，故这两个字段就是全部接口。"""
+
+    __slots__ = ("tokens", "answer_pos")
+
+    def __init__(self, tokens, answer_pos):
+        self.tokens, self.answer_pos = tokens, answer_pos
+
+
+def swap_query(d, vocab: Vocab, cfg: CorpusCfg):
+    """把 query 换成同篇另一个有 update 的 slot，语句序列一字不动。
+
+    token 数与 answer_pos 都不变（query 恒是 ent+attr 两个 token），故这不是
+    分布外输入，只是问了同一篇文档的另一个问题。返回 None 表示该篇没有第二个
+    带 update 的 slot 可用。
+
+    用途：直接测「模型是否真的读了 query」。生成器让值在文档内不重复抽取
+    （_ValueDraw），故换 slot 必然换答案 —— 读 query 的模型必须改预测，靠结构
+    定位被查询 slot 的模型不会。
+
+    与 is_break 无关，故在主网格上同样良定义。反转文档只是结构差异**更大**的
+    地方（q slot 语句数恒为 R+1 而非反转文档约 0.6R+1，加上 antRbk 的间距差
+    异），不是这个测量成立的前提。主网格上待检的结构线索是 App:gen 第五条那
+    个部分成立的不变量：被查询 slot 的副本比填充 slot 更分散。
+    """
+    per = {}
+    for s in d.stmts:
+        per.setdefault((s.ent, s.attr), []).append(s.val)
+    cand = [k for k, vs in per.items()
+            if k != (d.q_ent, d.q_attr) and len(set(vs)) >= 2]
+    if not cand:
+        return None
+    e, a = cand[len(cand) // 2]          # 取中间一个，不消耗随机数
+    toks, apos = emit(d.stmts, e, a, d.q_hist_k, _answer_val(d), vocab, cfg)
+    return _View(toks, apos)
+
 
 def _fit_offset_hint(d) -> int:
     return d.realized_delta
@@ -686,9 +730,49 @@ def probe_selfcheck(cfg: CorpusCfg, vocab: Vocab, n: int = 600,
     rng = random.Random(0)
     stats: Dict[str, dict] = {}
 
+    # ---- 旋钮 6：按 is_break 分层 ----
+    # 逐编辑的断言只在非反转文档上跑，与 go_nogo 的读数域一致。理由不是
+    # 「反转文档上标签份数不同」这么笼统：relabel_old 会把窗口里的末代值副本
+    # 一起覆写成新值，标签份数从 n_new_kept 掉回 1，任何统一的期望份数都是错的。
+    # 过滤到 base 之后，下面 vals.count(ed.answer)==1 那条原始断言不用放宽。
+    base = [d for d in docs if not getattr(d, "is_break", False)]
+    brk = [d for d in docs if getattr(d, "is_break", False)]
+    assert base, "没有非反转文档，探针无域"
+    if getattr(cfg, "p_break", 0.0) > 0.0:
+        assert brk, (
+            f"p_break={cfg.p_break} 但一篇反转文档都没有（n={n}）。两个可能："
+            f"n 太小（p_break×n < 1），或 generator 没把 is_break 写进 Doc —— "
+            f"后者的症状是多重性确实翻了（collide 的 RARITY|RECENCY 掉到 "
+            f"1−p_break、covar 的 revQ≈p_break）而 Doc.is_break 恒 False。"
+            f"判别式：answer_val_id 是否为 -1，nb_pair.py 的 check_inert 在 "
+            f"p_break=0 下就能测出来。")
+        # 非反转文档上式 1 必须精确成立。这是硬断言：它在 arm 里没被改动，
+        # 目标函数与 Bayes 规则也没变，这正是 N− 作为"同任务对照"的依据。
+        for d in base:
+            assert r_rarity(d) == r_last_value(d), \
+                "非反转文档上 rarity 与 last_value 分歧，式 1 被意外破坏"
+        # 反转文档上别名应当破除，但存在有效损耗：窗口越界可能把末代值的副本
+        # 丢到只剩钉在 p_final 那一份，counts 退化成 {老值:1, 末代值:1}，
+        # rarity 的平票规则裁给更近者，于是又与 last_value 同指。这些文档的
+        # 别名没破除，且在 N+ 下更糟 —— 标签取的是 q_history[-2]（老值），
+        # 而实现出来的 argmin 指向末代值，该篇的标签不由任何一条候选规则产生，
+        # 是训练信号里的纯噪声。故须量化而非断言掉，并让 collide.py 的
+        # RECENCY|RARITY 对齐到 1-p_break×(1-degen) 而不是 1-p_break。
+        degen = sum(1 for d in brk if r_rarity(d) == r_last_value(d)) / len(brk)
+        stats["break"] = dict(
+            frac=len(brk) / len(docs), degen=degen,
+            n_old=sum(d.n_old_kept for d in brk) / len(brk),
+            n_new=sum(d.n_new_kept for d in brk) / len(brk))
+        assert degen < 0.02, (
+            f"{degen:.1%} 的反转文档别名未破除（末代值副本被窗口越界丢尽）。"
+            f"N+ 下这些篇的标签无规则可依，须先收窄 spread 或提高 n_stmts_lo")
+        # 反转文档必须被 break_rarity 的域排除，否则读数混入训练分布内的配置
+        assert all(apply_edit(d, "break_rarity", vocab, cfg, rng, offset) is None
+                   for d in brk), "反转文档未被 break_rarity 域排除"
+
     for kind, (_, tgt, sign) in EDITS.items():
         ok = 0
-        for d in docs:
+        for d in base:
             ed = apply_edit(d, kind, vocab, cfg, rng, offset)
             if ed is None:
                 continue
@@ -715,14 +799,14 @@ def probe_selfcheck(cfg: CorpusCfg, vocab: Vocab, n: int = 600,
             else:
                 assert vals.count(ed.answer) == 1, \
                 f"{kind}: 答案值在前缀出现 {vals.count(ed.answer)} 次"
-        stats[kind] = dict(yield_rate=ok / n, target=tgt, sign=sign)
+        stats[kind] = dict(yield_rate=ok / len(base), target=tgt, sign=sign)
 
     cov: Dict[str, float] = {}
     for rule, kinds in RULE_EDITS.items():
-        hit = sum(1 for d in docs
+        hit = sum(1 for d in base
                   if any(apply_edit(d, k, vocab, cfg, rng, offset) is not None
                          for k in kinds))
-        cov[rule] = hit / n
+        cov[rule] = hit / len(base)
     stats["coverage"] = cov
 
     # 机器自检 1：合成预测器必须被 attribute 读回它自己那条规则
@@ -736,8 +820,8 @@ def probe_selfcheck(cfg: CorpusCfg, vocab: Vocab, n: int = 600,
     for kind, (_, tgt, sign) in EDITS.items():
         if stats[kind]["yield_rate"] < YIELD_MIN:
             continue
-        hot = causal(docs, RulePredictor(tgt, offset), kind, offset, vocab, cfg)
-        cold = causal(docs, RulePredictor(TRUTH, offset), kind, offset, vocab, cfg)
+        hot = causal(base, RulePredictor(tgt, offset), kind, offset, vocab, cfg)
+        cold = causal(base, RulePredictor(TRUTH, offset), kind, offset, vocab, cfg)
         assert sign * hot["d_margin"] > 1.0, \
             f"{kind}: 规则型 Δ={hot['d_margin']:+.2f}（期望符号 {sign:+d}），编辑无力"
         assert abs(cold["d_margin"]) < 1e-9, \
@@ -782,3 +866,30 @@ if __name__ == "__main__":
                                   max_updates=1, r_old_lo=r, r_old_hi=r,
                                   use_marker=False, delta_d_lo=dlo,
                                   delta_d_hi=dhi, p_hist_query=0.0), vocab)
+
+    # 旋钮 6 的两个格（与 run plan 一致）。不跑这几行，本文件新加的分层断言
+    # （式 1 在非反转文档上精确成立、degen 门、反转文档被 break_rarity 域排除）
+    # 一次都不会被执行。
+    # R_old=1 不能进这里：rb = r_old_hi = 1 不大于 k_old_break = 1，
+    # validate_cfg 会拒（rarity 仍指向末代值，别名未破除）。
+    print("\n== 旋钮 6：别名破除臂 ==")
+    # k/rb 须满足 k+rb = R+1（反转 slot 与常规 slot 语句数相同）且 rb>k。
+    # R3 只有 (1,3) 一种分法，rb=0 表示取 r_old_hi。
+    # R16 取 k 最大的 (8,9)：老值存活的条件从「q_old 全部 16 个位置非负」松成
+    # 「第 8 小的非负」。前者概率 (33/91)^16≈9e-8，64 次重试必失败，反转文档
+    # 100% 走 clamp 回退，q_gap 从 5.30 塌到 1.71，构成绕过 query 的旁路。
+    for r, d, k, rb in [(3, 8, 1, 0), (5, 8, 1, 0), (8, 8, 1, 0)]:
+        dlo, dhi = dd_band(d)
+        for tr in ("recency", "rarity"):
+            cfg = CorpusCfg(name=f"nb{tr[:3]}_R{r}_D{d}", seed=0, p_update=0.5,
+                            max_updates=1, r_old_lo=r, r_old_hi=r,
+                            use_marker=False, delta_d_lo=dlo, delta_d_hi=dhi,
+                            p_hist_query=0.0, n_stmts_lo=45, n_stmts_hi=55,
+                            p_break=0.10, truth_rule=tr,
+                            k_old_break=k, r_new_break=rb)
+            st = probe_selfcheck(cfg, vocab, n=1200)
+            b = st.get("break", {})
+            if b:
+                print(f"    反转 {b['frac']:.3f}  别名未破除(degen) "
+                      f"{b['degen']:.4f}  老值/末代值存活 "
+                      f"{b['n_old']:.2f}/{b['n_new']:.2f}")

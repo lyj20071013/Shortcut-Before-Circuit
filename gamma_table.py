@@ -1,13 +1,4 @@
-"""生成 App B 的 γ 表 LaTeX 行，八行全部从 go_nogo 缓存读，不手抄。
-
-三个校验，任一不过就在 stderr 报警：
-  n 接近 400 —— 混进 --docs 200 的旧结果会让 frac+ 与论文表格差第三位小数
-  mass 与 mOK —— mass<0.5 的行不出读数（那两个 γ=1 的 R3 格）
-  两侧 gain 齐全 —— 缺一侧说明该格没有对照
-中位数一律用 ungated 的 d_median，与 Table stats 的 median 列同约定。
-gated 的 d_median_valid 在 mOK 低的格上是在极少数文档上算的（R3/D5 s0 gamma1
-是 39 篇），不能与 ungated 混排。
-"""
+"""Summarize gain-arm terminal readouts; does not compute the RoPE-aware bound."""
 import argparse
 import glob
 import json
@@ -88,4 +79,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# python gamma_table.py runs_g2 /root/autodl-tmp/runs_g2_s1 /root/autodl-tmp/runs_gamma1 > gamma_rows.tex
+# python gamma_table.py runs_g2 runs_gamma1 > gamma_rows.tex

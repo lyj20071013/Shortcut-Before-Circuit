@@ -1,40 +1,4 @@
-"""∇θΔ 与 ∇θL 的几何关系。§5.6 那句"the direct test is not in this paper"的补丁。
-
-测的是什么
-  g_L  = ∇θ L，L 是训练分布上的全 token CE（与 train.py 完全同一个 loss）
-  g_Δ  = ∇θ E[Δ]，Δ 是 break_rarity 的配对读数（+ 为 rarity 型）
-  另测 g_S = ∇θ E[σ(Δ/τ)]，符号比例的光滑替身。正文主 DV 是符号比例而不是
-       均值，符号比例不可微，σ(Δ/τ) 是最接近的可微代理，τ 是唯一自由量。
-
-四层证据，缺一层都不足以说"存在平坦方向"
-  1 一阶角度   cos(g_L, g_Δ)。单独看没有意义，必须与下面两个尺度并列。
-  2 噪声地板   把 loss 批分两半，cos(g_L^A, g_L^B) 给出 g_L 里有多少是信号；
-               再给一个随机方向的 cos 作为纯偶然水平（26M 维下约 2e-4）。
-               只有当 cos(g_L, g_Δ) 落在偶然水平附近、而 cos(g_L^A, g_L^B)
-               显著大于它时，"正交"才是关于真梯度的陈述而不是关于噪声的。
-  3 有限差分   沿 û 走 ±ε，同一批文档上读 L 与 Δ 的实际变化。头条数字是
-               "每抬高一个单位训练 loss 能换到多少 nats 的 Δ"，并与沿 û_L
-               走同样步长的对照相比。一阶角度可以被二阶效应推翻，这一层不会。
-  4 曲率       对称二阶差分，沿 û_Δ⊥ / û_L / 随机方向各一次，同批同点。
-               平坦是关于二阶的陈述；只报一阶角度会被审稿人一句话打回。
-
-û_Δ⊥ 是 g_Δ 剔除 g_L 分量后的单位向量，是"交换两条规则但不动损失"这个对象
-最干净的实现。头条结论应该用它，g_Δ 原方向作为参照一起报。
-
-这个脚本不能建立什么（正文里必须照抄）
-  ckpt 不含 optimizer state（省三倍磁盘），所以这里测的是几何，不能从
-    checkpoint 续训，也不能说"优化器确实没往这个方向走"，只能说"目标函数在
-    这个方向上没有可用的一阶或二阶信号"。
-  g_L 是有限批估计。噪声地板量化了这一点，但 ε→0 的极限不可测。
-  Δ 的梯度取自未按 mass 门筛过的全域文档：逐文档门是不连续的，放进被求导的
-    目标里会引入伪梯度。mass 均值一并输出，低于 0.5 时该 checkpoint 的读数
-    本身无效，整行应弃用（--mass-gate 可开硬筛做稳健性对照）。
-
-精度
-  全程 fp32 且显式关掉 TF32。关心的 ΔL 在 1e-5 量级，TF32 的 10 位尾数会把它
-  变成舍入噪声。FD 的每一次求值都复用同一批文档与同一组编辑对，否则采样噪声
-  比信号大三个数量级。
-"""
+"""Measure readout/loss gradients and symmetric finite differences."""
 import argparse
 import json
 import math
@@ -293,7 +257,7 @@ def grad_loss(model: LM, flat: Flat, batches) -> torch.Tensor:
 def grad_delta(model: LM, flat: Flat, pairs: Pairs, val_lo: int, n_val: int,
                objective: str, tau: float) -> torch.Tensor:
     """objective='mean' 取 E[Δ]；'sign' 取 E[σ(Δ/τ)]，符号比例的可微替身。
-    两个都要报：正文主 DV 是符号比例，但均值是更简单、更少自由量的对象。"""
+    The sign surrogate depends on tau; its gradient differs from that of the mean."""
     flat.zero()
     for b in pairs.batches:
         d, _ = pair_delta(model, b, val_lo, n_val)

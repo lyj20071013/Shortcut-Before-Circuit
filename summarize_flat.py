@@ -1,13 +1,4 @@
-"""把 flatdir.jsonl 压成窄行摘要，并做三项内部一致性检查。
-
-检查一 方向导数。沿 û 的一阶导有三个算法：dD_plus/eps、中心差分、以及
-        |g_Δ|×perp_frac。三者在小 eps 下应当一致，不一致说明 fd_probe 或
-        梯度累加有一处错，余弦的独立校验就失效。
-检查二 精度地板。dL_plus 若接近 L0 的 ULP（float32 约 1.2e-7 相对量），
-        该行的 ΔL 是舍入噪声而非测量值，curv_L 与 nats_per_loss 不可引用。
-检查三 sigmoid 区制。|g_Δ|/|g_S| 若为 4τ，说明 Δ≈0，符号比例代理退化成
-        均值的线性缩放，该 checkpoint 上它不提供独立信息。
-"""
+"""Summarize saved geometry records."""
 import json, math, sys
 
 for path in sys.argv[1:]:

@@ -1,19 +1,4 @@
-"""梯度正交性。cos(grad Delta, grad L) 加噪声地板与正对照。
-
-若别名使"用哪条规则"成为目标函数的平坦方向，则读数方向的梯度应与损失梯度
-正交到噪声地板量级，而目标函数直接优化的量（真值 margin）不应如此。
-
-六个梯度，同一 checkpoint：
-  gD      读数 Delta（式 2）
-  gM      真值 margin，符号取"越大越好"，正对照
-  gLa/gLb 全 token 损失，两个不相交 batch
-  gAa/gAb 答案位专属损失，两个不相交 batch
-
-全 token 损失里答案位只占 1/225，正对照在它上面会被稀释，故两个参照都报。
-判据：cos(gD, gL) 落在地板量级 且 cos(gM, -gL) 明显高于地板。
-
-全程 fp32：bf16 的梯度噪声会淹没余弦测量。
-"""
+"""Exploratory gradient measurements requiring checkpoints."""
 import argparse
 import json
 import os

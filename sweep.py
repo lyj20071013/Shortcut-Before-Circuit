@@ -1,45 +1,4 @@
-"""主网格驱动。相图 = R_old × ΔD，DV = break_rarity 的因果读数 d_margin。
-
-用法：
-  python sweep.py --check              25 格预检，纯 CPU，约 30 秒，必须先过
-  python sweep.py --dry-run            打印将要执行的命令，不跑
-  python sweep.py                      跑全网格（预检不过则拒绝启动）
-  python sweep.py --collect            汇总已完成的 run，可随时跑，不干扰训练
-
-产物写入 --out（默认 runs_g2），与第一轮的 runs/ 分开：runs/ 里的 R2 五格
-是位置捷径瞬态的证据、R16/R5/R3 的 12000 步 checkpoint 是步数敏感性对照，
-都要留。新目录同时让 .pt 存在检查不会误跳过（步数已从 12000 改为 16000）。
-
-设计要点：
-- seed-major + 信息优先：seed 0 的四角与中心先跑，约 7 小时就能看出相图形状。
-  若 Δ 在四角挤在同一量级，说明没有相变边界，及早止损而不是烧完 91 小时。
-- 断点续跑：.pt 存在即跳过。SSH 掉线后重跑同一条命令即可接上。
-- n_values=512：pilot 的 128 会让 _ValueDraw 死循环（R_old 小时一篇文档约 79
-  个 slot、消耗约 120 个值，而 _keyed 丢弃的语句已消耗的值不归还），默认 2000
-  则浪费算力。512 给约 4 倍余量。
-- R_old 上限 16 而非 20：validate_cfg 要求 spread×n_stmts_lo ≥ 2×R_old，
-  0.8×45=36 容得下 16 容不下 20。要上 20 得把 n_stmts_lo 提到 50。
-
-【位置捷径与三态，第一轮实测得到的核心约束】
-训练分两阶段。模型先爬满纯位置规则（复制固定 token 偏移处的值）的解析上限
-posCeil = 1/(dd_hi-dd_lo+1)，此时 copy_acc≈0，检索回路根本没形成；之后某一步
-突然逃逸到 copy_acc≈1。实测：
-  R2/D2  卡在 acc=0.326 vs posCeil=0.333（98%），12000 步未逃逸
-  R3/D5  逃逸前 acc=0.141 vs posCeil=0.143（98%），step 6000 逃逸
-  R2/D16 posCeil 仅 0.059，step 4000 逃逸
-  R16/*  step 1000 前逃逸
-逃逸时刻由 R_old 决定（复制监督密度），捷径收益由 ΔD 带宽决定。三条后果：
-
-1. Δ 只在 retrieval 态有意义。position 态模型的 break_rarity 响应方向恒为负
-   （R2/D2 Δ=-0.47 fx=0.05、R2/D8 Δ=-1.30 fx=0.02），若混进相图会在低 R_old
-   角伪造出一个「frequency 型」区域。classify() 三态判读负责隔离，只有
-   state=retr 的 run 进格均值。
-2. R_old=2 在 16000 步内不逃逸，移出主网格（下界取 3，R3 已验证 step 6000
-   逃逸、8000 达 acc=0.999）。R2 五格作为捷径瞬态证据进附录。
-3. total_steps 12000→16000。收敛后训练量在 R16（约 15000 步）与 R3（约 8000
-   步）之间的比值从 2.75 降到 1.9，减轻「比的是训练时长而非数据统计」这一
-   混淆。逃逸步数本身作为协变量报告，见 collect 的 esc 列与末尾汇总。
-"""
+"""Launch or list the 75-run main grid."""
 import argparse
 import itertools
 import json
@@ -48,6 +7,7 @@ import random
 import subprocess
 import sys
 import time
+from typing import Optional
 
 from config import CorpusCfg, LangSpec, dd_band, validate_cfg
 from go_nogo import sign_test_p
@@ -99,15 +59,41 @@ def pos_ceil(d):
     return 1.0 / (hi - lo + 1)
 
 
-def classify(acc, copy_acc, d):
+def classify(acc, copy_acc, d, ceil=None, chance=None):
     """retr / posNN% / none。posNN% 是 acc 占 posCeil 的比例，≥90% 即可判定
-    模型在用位置规则；此时 Δ 不可用。"""
+    模型在用位置规则；此时 Δ 不可用。
+
+    ceil=None 时用 pos_ceil(d)，即 1/|supp| —— 主网格的解析上限，成立依赖
+    每条语句恰 4 token。已发表的 75 个 run 走这条路，行为逐比特不变。
+
+    ceil 给了就用它。自然语言表层臂（nl_generator）句长可变，1/|supp| 不再
+    是上限：变长语句让固定 token 偏移更难命中，实测上限低于解析值。那个数
+    由 nl_collide.py 测出，写在 nl_collide.jsonl 的 pos_emp 字段。
+
+    chance 是读数位置上的随机基线（NL 臂 = 1/|ADJ|）。给了就要求
+    posCeil > chance 才承认位置态，理由见函数体内注释。主网格不给，
+    因为它的 chance = 1/n_values 远低于 posCeil，这条从不触发。
+
+    两个参数存在的理由都是两个臂必须共用一个分类器。分类器决定哪些 run 进
+    网格（state=retr 才可用），若两臂各用一个，读数就不可并列 —— 而并列是
+    NL 臂的唯一目的。
+    """
     if acc != acc or copy_acc != copy_acc:
         return "?"
     if copy_acc >= COPY_FLOOR and acc >= ACC_FLOOR:
         return "retr"
-    if copy_acc < 0.5 and acc >= 0.5 * pos_ceil(d):
-        return f"pos{acc / pos_ceil(d):.0%}"
+    pc = pos_ceil(d) if ceil is None else ceil
+    if pc <= 0 or pc != pc:
+        return "none"
+    # 位置态只在捷径优于随机时有意义。posCeil <= chance 的格子里，
+    # "复制固定偏移处的值"比瞎猜还差，模型没有动机去学它，而
+    # acc >= 0.5*posCeil 这个判据会把任何随机水平的模型判成 pos 并读出
+    # posNNNN%。主网格的 chance 是 1/n_values≈0.002、posCeil 是它的
+    # 30-170 倍，所以那里这条从不触发；NL 臂读数在 24 个 adj 上会触发。
+    if chance is not None and pc <= chance:
+        return "none"
+    if copy_acc < 0.5 and acc >= 0.5 * pc:
+        return f"pos{acc / pc:.0%}"
     return "none"
 
 
@@ -270,10 +256,42 @@ def read_run(jl):
     return probe, ev, esc
 
 
-def collect(out_dir, txt):
+def load_pos_emp(path: Optional[str]) -> dict:
+    """读 nl_collide.jsonl -> {(r, d): pos_emp}。None 或文件不存在返回空字典，
+    此时 classify 退回 1/|supp|，主网格行为不变。
+
+    存在理由见 classify 的 docstring：两个臂必须共用一个分类器，否则读数
+    不可并列。这个函数是 NL 臂把它测出的经验上限交给分类器的唯一通道。
+    """
+    if not path:
+        return {}
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"--pos-emp 指向 {path}，不存在。先跑 nl_collide.py 生成它；"
+            f"若要用解析上限就不要给这个参数。")
+    out = {}
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            o = json.loads(line)
+            # chance 与 pos_emp 一起读。缺 chance 的旧文件退回 None，
+            # 此时不施加随机基线下限（行为等同于只给 ceil）。
+            out[(o["r_old"], o["dd"])] = (o["pos_emp"], o.get("chance"))
+    if not out:
+        raise SystemExit(f"{path} 里没有可用记录，检查 nl_collide 的输出。")
+    return out
+
+
+def collect(out_dir, txt, pos_emp=None):
     """相图数据表。DV 是 break_rarity 的 d_margin：观测型 dominant 在此设计下
     恒为 last_value=rarity（两者在训练分布上逐篇等价，attribute 的 n_disc=0、
-    rate_disc=nan），故主图必须用因果读数。"""
+    rate_disc=nan），故主图必须用因果读数。
+
+    pos_emp：{(r,d): 经验 posCeil}。给了就用它替代 1/|supp|（NL 臂）。
+    空字典或 None 时逐比特等同于已发表的行为。
+    """
+    pos_emp = pos_emp or {}
     rows, flags = [], []
     for r, d, s in cells():
         tag = f"R{r}_D{d}_s{s}_{TAG}"
@@ -287,7 +305,9 @@ def collect(out_dir, txt):
         nan = float("nan")
         ev = ev or {}
         acc, ca = ev.get("acc", nan), ev.get("copy_acc", nan)
-        x = dict(r=r, d=d, seed=s, step=probe["step"], state=classify(acc, ca, d),
+        ceil, ch = pos_emp.get((r, d), (None, None))
+        x = dict(r=r, d=d, seed=s, step=probe["step"],
+                 state=classify(acc, ca, d, ceil, ch),
                  acc=acc, copy=ca, esc=esc, tail0=ev.get("acc_tail0", nan),
                  n=c.get("n", 0), y=c.get("yield_rate", nan),
                  dm=c.get("d_margin", nan), fx=c.get("frac_expected", nan),
@@ -368,20 +388,27 @@ def main():
     ap.add_argument("--skip-check", action="store_true")
     ap.add_argument("--out", default=OUT_DEFAULT)
     ap.add_argument("--txt", default=None, help="默认 <out>/grid.txt")
+    ap.add_argument("--pos-emp", default=None,
+                    help="nl_collide.jsonl 的路径。给了就用经验 posCeil 替代 "
+                         "1/|supp|（自然语言表层臂）。不给则逐比特等同于"
+                         "已发表行为。")
     a = ap.parse_args()
     txt = a.txt or os.path.join(a.out, "grid.txt")
+    pe = load_pos_emp(a.pos_emp)
+    if pe:
+        print(f"[posCeil] 用经验值，{len(pe)} 格来自 {a.pos_emp}")
 
     if a.check:
         sys.exit(0 if check(a.out) else 1)
     if a.collect:
-        collect(a.out, txt)
+        collect(a.out, txt, pe)
         return
     if not a.skip_check and not check(a.out):
         print("\n预检未通过，不启动主网格。")
         sys.exit(1)
     run_all(a.out, a.dry_run, a.seed)
     if not a.dry_run:
-        collect(a.out, txt)
+        collect(a.out, txt, pe)
 
 
 if __name__ == "__main__":

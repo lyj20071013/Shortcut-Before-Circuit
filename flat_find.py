@@ -1,12 +1,4 @@
-"""从 flatdir jsonl 生成 App flat 的表行。
-
-用法：
-  python flat_find.py <R3D5.jsonl> <R16D2.jsonl> > flat_rows.tex
-
-只取索引 1 的 eps（第二小档）。最小档 dL 落在 fp32 ULP 附近，最大两档已离开
-线性区（负侧符号会反），只有这一档同时脱离精度地板且仍在线性区。
-mass < 0.5 的行加脚注标记 a：那些 checkpoint 的读数无效，列出只为完整。
-"""
+"""Extract rows from saved exploratory geometry measurements."""
 import json
 import os
 import sys

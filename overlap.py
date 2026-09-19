@@ -1,13 +1,5 @@
 
-"""App H：位置规则解释平台态负读数的可检验预测。
-
-平台态的 Δ 恒为负（R2 行实测 −0.47 / −1.30 / −0.94）。App H 给的候选解释是：
-多重性反转把 R−1 份 v_old 改写成 v_new，若位置规则读取的偏移 4ΔD+6 落在
-被改写的副本上，规则的输出就从 v_old 翻到 v_new，而 v* = v_old，故 Δ<0。
-
-这个解释给出一个不需要新训练的预测：偏移与副本位置的重合率应当预测 |Δ|
-的大小，且在从未占据位置规则的那格重合率与 Δ 都应接近零。
-"""
+"""Measure fixed-position overlap with rewritten statements."""
 import argparse, json
 from collections import Counter
 

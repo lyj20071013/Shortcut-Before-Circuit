@@ -1,10 +1,5 @@
 
-"""App I：七条候选规则与真值的逐格碰撞率。
-
-正文 §3.1 声称 FREQUENCY 与真值在 0.968–1.000 的文档上一致，这个数现在
-没有出处。碰撞率决定哪些规则能被观测归因分开：碰撞率 1.000 的规则对必须
-用因果编辑，否则任何观测方法都只能给出「两者都对」。
-"""
+"""Evaluate candidate-rule collisions on generated documents."""
 import argparse, json
 from collections import Counter
 
@@ -62,6 +57,13 @@ def main():
                     help="固定带宽 W：ΔD ~ U[d, d+W]。0 = 用 dd_band(d)")
     ap.add_argument("--rows", type=int, nargs="+", default=R_OLDS)
     ap.add_argument("--cols", type=int, nargs="+", default=DDS)
+    # 旋钮 6：别名破除的前置硬门。本文件的 truth 是最后一条 q 语句的值，
+    # 即 recency 的预测，故 RAR 列本来就是「rarity 与 recency 同指的比例」。
+    # p_break>0 时它应从 1.000 降到 1−p_break 附近 —— 这是别名被破除了多少的
+    # 直接量化，也是整个 arm 唯一必须在训练前看到的数。
+    ap.add_argument("--p-break", type=float, default=0.0)
+    ap.add_argument("--k-old-break", type=int, default=1)
+    ap.add_argument("--r-new-break", type=int, default=0)
     a = ap.parse_args()
 
     spec = LangSpec(n_values=a.n_values, n_entities=a.n_entities)
@@ -76,7 +78,9 @@ def main():
             cfg = CorpusCfg(name=f"R{r}_D{dd}", seed=0, p_update=0.5,
                             max_updates=1, r_old_lo=r, r_old_hi=r,
                             use_marker=False, delta_d_lo=lo, delta_d_hi=hi,
-                            p_hist_query=0.0, n_stmts_lo=45, n_stmts_hi=55)
+                            p_hist_query=0.0, n_stmts_lo=45, n_stmts_hi=55,
+                            p_break=a.p_break, k_old_break=a.k_old_break,
+                            r_new_break=a.r_new_break, truth_rule="recency")
             docs = list(generate_corpus(vocab, cfg, a.docs, seed_offset=7))
             # 位置规则先在同一批文档上调准偏移，再计分：这与 App C 的
             # posCeil 是同一个量，此处用经验众数而非解析式，作为交叉验证
@@ -131,12 +135,32 @@ def main():
         f.write("\\bottomrule\n\\end{tabular}\n")
     print(f"\nwrote {a.out}.tex, {a.out}.jsonl")
 
-    # 全格恒 1.000 的规则必须用因果编辑；正文的可辨识性论证依赖这一点
+    # Identical rule predictions on these documents are observationally indistinguishable.
     for k in names:
         vs = [row[k] for row in rows]
         lo_v, hi_v = min(vs), max(vs)
         flag = "  ← 全格恒等，观测归因不可分" if lo_v > 0.9995 else ""
         print(f"{k:>20}: {lo_v:.3f}–{hi_v:.3f}{flag}")
+
+    # 旋钮 6 的前置硬门。本文件的 truth 是最后一条 q 语句的值（= recency 的
+    # 预测），故 rarity 列就是「rarity 与 recency 同指的比例」= 别名对齐度。
+    # 它应从主网格的 1.000 降到 1−p_break 附近。降不下来即别名没破除，
+    # 后面所有 GPU 时间都会浪费在一个仍然共延的语料上。
+    if a.p_break > 0.0:
+        rar = [row["rarity"] for row in rows]
+        exp = 1.0 - a.p_break
+        worst = max(abs(v - exp) for v in rar)
+        print(f"\n别名门：RARITY|RECENCY = {min(rar):.3f}–{max(rar):.3f}，"
+              f"期望 ≈ {exp:.3f}（1−p_break）")
+        # 容差含两部分：1500 篇的采样误差（p_break=0.1 时约 0.008）与
+        # degen（窗口越界丢尽末代值副本，rarity 又与 recency 同指，
+        # 见 probe.probe_selfcheck 的 degen 门）。degen 只会让实测偏高。
+        if worst > 0.03:
+            print(f"  ⚠ 最大偏差 {worst:.3f} > 0.03。偏高 -> degen 过大"
+                  f"（窗口越界丢尽末代值副本，该篇别名未破除）；"
+                  f"偏低 -> 反转率高于名义值。两者都须先查清再上 GPU。")
+        else:
+            print(f"  最大偏差 {worst:.3f} ≤ 0.03，别名已按名义比例破除。")
 
 if __name__ == "__main__":
     main()

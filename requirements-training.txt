@@ -1,0 +1,6 @@
+# Install a torch build suitable for the target CUDA system.
+-r requirements-analysis.txt
+torch
+transformers
+# Optional alternative model source: modelscope
+

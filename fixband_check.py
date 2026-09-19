@@ -1,16 +1,4 @@
-"""固定带宽 arm 的上卡前预检。只用 CPU，不碰模型。
-
-拦三类问题：
-  1 结构退化。ΔD 上界抬高会压缩 q_old 可用窗口，2R_old/W 超过主网格最坏格
-    （0.78）就意味着 q slot 可由离散度定位，整条臂的结论作废。这是本臂特有的
-    风险，主网格的 dd_band 下不会出现。
-  2 App A 的五条生成器不变量在新带宽下是否仍然成立。它们在主网格上验过，
-    换了 ΔD 支撑就得重验，不能假定继承。
-  3 编辑域。ΔD 抬高会丢弃更多越界副本，域跌破 0.5 时该格是在不到一半的
-    文档上取读数，与主网格不可比。
-
-每格给一行 OK / WARN / FAIL。有 FAIL 时退出码非零，可直接作为 runner 的门。
-"""
+"""Check the fixed-distance-band generator configuration."""
 import argparse
 import math
 import random

@@ -1,12 +1,5 @@
 
-"""两个种子的曲率比与 nats 比，只在 post-escape（mass≥0.5）段。
-
-cv⊥/cv_L  主数字。无标度，不含读数量纲。这是进论文的那个。
-cv⊥/cv_R  证明不是绝对平坦。
-nats⊥/nats_L  |g_Δ| 在比里约掉，但含 cos(g_Δ,g_L) 在分母，噪声大，仅辅助。
-
-取索引 1 的 eps（第二小档）：最小档 dL 落在 fp32 ULP 附近，最大两档已离开线性区。
-"""
+"""Summarize finite-difference measurements from saved records."""
 import json
 import os
 import sys

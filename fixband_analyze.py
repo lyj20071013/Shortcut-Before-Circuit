@@ -1,17 +1,4 @@
-"""固定带宽 arm 的读表。posCeil 恒定，所以三件事各自变成干净的对照：
-
-  逃逸时刻   §6.2 说 R3 行的逃逸跨 3400–9600 步、"broadly inverse with band
-             width but not monotone in it"。带宽现在恒定，若逃逸仍随 ΔD 变，
-             驱动量是距离；若不变，驱动量是带宽。这是本臂唯一能跨种子复现的
-             DV，也是主要产出。
-  平台高度   四格同为 posCeil=1/9，主文 Table 2 只有两格同 |supp|。
-             四点同一天花板是 Eq. 3 强得多的内部复制，且从现有 eval 日志直接读。
-  终态读数   带跨种子散布，只能报"是否落在 Table 11 的散布内"。
-
-导数符号约定与产 Table 4 的脚本一致：算的是 -d loss/d log step（下降越陡
-峰越高）。尾部 25% 排除：cosine 末段衰减本身产生正峰，高 R_old 上会超过
-逃逸峰。
-"""
+"""Summarize the fixed-distance-band control arm."""
 import argparse
 import json
 import math

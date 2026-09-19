@@ -1,30 +1,5 @@
 # -*- coding: utf-8 -*-
-"""flatctrl.py — 平坦方向的正对照。
-
-flatdir.py 测 break_rarity 读数的梯度与 g_L 的几何，结论是"平"。缺的是
-正对照：同一流程、同一 checkpoint、另一条读数，且那条读数交易的规则对是
-目标函数区分的。若它也平，"平"是流程的性质；若它不平，"平"追踪的就是
-"目标函数是否区分这一对"。
-
-本脚本把 flatdir 的测量套在 probe.EDITS 的每条编辑上，逐 checkpoint 输出
-(目标规则, 碰撞率, mass, 几何量) 的对照表。
-
-判读
-  break_rarity  目标 rarity，碰撞率 1.000（Eq.1）。预期 perp_frac≈1、
-                cos≈偶然水平、nats 比值 1e3–1e5。
-  drop_freq     目标 frequency，域与 break_rarity 相同。定向方向朝 frequency
-                型 = 在 base（训练）文档上更偏好 v_old = 抬高训练损失，
-                故预期 perp_frac 明显 <1、nats 比值 ~1。
-  其余          primacy / position / last_update_global，碰撞率各异。
-                last_update_global 的碰撞率随 ΔD 变，可做同规则内剂量反应。
-
-不能建立什么
-  break_rarity 的编辑后文档在训练分布外（答案值重复，probe_selfcheck 对它
-  单独放宽断言），对照编辑的编辑后文档在分布内。本对照排除的是"任何结构化
-  方向在 26M 维里都显得平"。它不单独排除"平来自 OOD 而非 alias" —— 但
-  编辑必须 OOD 才能分开共延规则，这正是 Eq.1 的内容，OOD 性是 alias 的
-  后果而非独立因素。附录须照抄这一句。
-"""
+"""Measure answer-preserving edit controls using FP32 checkpoints."""
 import argparse
 import json
 import math

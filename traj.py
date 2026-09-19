@@ -1,14 +1,4 @@
-"""逐 run 轨迹派生量，多 seed。定义全部从 figs2.py 导入，与图 2 和
-Table tab:escape 同口径。
-
-  校准（必做一次）: python traj.py runs_g2 --seeds 0 --suffix _grid
-      peak/h 两列必须复现论文表 tab:escape 的 seed 0 列
-  固定带宽:        python traj.py <fixband目录> --seeds 0 1 2 --suffix _fixband
-
-边界伪影：cosine 末段单调爬升时，峰值搜索会撞在 tail_frac 窗口右边界上，
-返回衰减段内的位置而非环路形成处。主网格 seed 2 有三格如此（peak=12800
-=0.8x16000）。两个独立判据都标出来，不自动删——由你看过再决定剔除哪些。
-"""
+"""Summarize candidate peaks and temporal readout variation."""
 import argparse, os
 import numpy as np
 from figs2 import read_run, deriv, escape_peak, R_ORD, D_ORD
@@ -76,12 +66,12 @@ for s, dirp in zip(a.seeds, dirs):
                              term=R["probes"][-1][1] if R["probes"] else None,
                              n_post=len(post),
                              post_sd=(float(np.std(post, ddof=1))
-                                      if len(post) >= 5 else None)),         
+                                      if len(post) >= 5 else None),
                              sd_e=sd_e, sd_l=sd_l, ratio=ratio,
                              post_sd0=(float(np.std(post))
                                        if len(post) >= 5 else None),
                              post_sdx=(float(np.std(post_x, ddof=1))
-                                       if len(post_x) >= 5 else None))
+                                       if len(post_x) >= 5 else None)))
 
 def f(v, w, p=2):
     return "-".rjust(w) if v is None else f"{v:{w}.{p}f}"
@@ -93,7 +83,8 @@ for o in rows:
     print(f"{o['s']:<3}{o['r']:<3}{o['d']:<4}{str(o['gate']):>5}"
           f"{str(o['peak']):>7}{f(o['h'],7)}{f(o['runner'],8)}"
           f"{f(o['decay'],7)}{flag:>6}{f(o['pre_frac'],9)}"
-          f"{f(o['term'],7)}{o['n_post']:>7}{f(o['post_sd'],8,3)}")
+          f"{f(o['term'],7)}{o['n_post']:>7}{f(o['post_sd'],8,3)}"
+          f"{f(o['sd_e'],7,3)}{f(o['sd_l'],7,3)}{f(o['ratio'],7,2)}")
 print("EDGE = 峰位贴窗口右边界（伪影）; * = 末段衰减 > 峰高（该格改用 gate）")
 
 print("\n=== 行均值：全部 / 剔除 EDGE ===")
@@ -124,10 +115,12 @@ print(f"of the {len(lo20)} below 0.20, "
       f"{sum(1 for o in lo20 if o['term'] and o['term'] > 0.80)} end above 0.80")
 sd = [o["post_sd"] for o in rows if o["post_sd"] is not None]
 if sd:
+    # 这一行产出 app:drift 的 within-run sd 区间与中位数（已发表值
+    # 0.006–0.303、median 0.069）。原来这里粘了四个 f(o[...]) 片段，它们属于
+    # 上面的逐行打印（表头第 89 行确实有 postSD/sdE/sdL/L-E 四列）；`o` 是
+    # 第 91 行循环泄漏的最后一行，故不报错但会把最后一格的数字接在汇总行尾。
     print(f"within-run sd over {len(sd)} runs: {min(sd):.3f}-{max(sd):.3f}, "
-          f"median {np.median(sd):.3f}"          
-          f"{f(o['post_sd'],8,3)}{f(o['sd_e'],7,3)}{f(o['sd_l'],7,3)}"
-          f"{f(o['ratio'],7,2)}")
+          f"median {np.median(sd):.3f}")
 
     
 print("\n=== 组内 sd：三种口径，用来定 app:drift 的端点 ===")

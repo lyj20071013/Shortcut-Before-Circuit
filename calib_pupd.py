@@ -1,18 +1,5 @@
 # -*- coding: utf-8 -*-
-"""calib_pupd.py — 用 p_update 匹配 slot 数，固定文档长度。
-
-app:slotmatch 靠缩短文档把 R_old=8 的 slot 数压到 R_old=16 的水平，代价是
-长度从 204 token 掉到 116，slot 数/分散度/长度仍然绑在一起。p_update 只
-作用于填充 slot（generator._build_slot 的 force_update=False 分支），
-故它移动 slot 数而不动长度。
-
-本脚本扫 p_update，报 slot 数与 q_gap（= app:gen 的 ant_q，即"copy
-dispersion"），供选取匹配点。不训练，几分钟出结果。
-
-用法:
-    python calib_pupd.py                      # 默认扫 R8/R16 的 ΔD=2
-    python calib_pupd.py --r 8 --d 2 --docs 2000
-"""
+"""Generator calibration for update-probability matching."""
 import argparse
 from statistics import mean
 
@@ -92,7 +79,7 @@ def main():
         print(f"\n找上表里 R8 的 slots 最接近 {ref[16]['slots']:.2f} 的那个 p，")
         print(f"和 R16 的 slots 最接近 {ref[8]['slots']:.2f} 的那个 p。")
         print(f"tokens 两侧应当几乎不变 —— 这正是本臂相对缩短臂的全部意义。")
-        print(f"q_gap 会跟着动，动了多少要在附录里报，不能假定它不动。")
+        print(f"Changing this setting can also change q_gap; inspect the measured values.")
 
 
 if __name__ == "__main__":

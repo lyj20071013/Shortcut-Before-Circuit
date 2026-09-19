@@ -1,14 +1,9 @@
-"""seed 2 的轨迹派生量。定义全部从 figs2.py 导入，保证与图 2 和
-Table tab:escape 同一口径。
-
-  先校准:  python seed2_traj.py runs_g2 0     # 应复现表 17 的 seed 0 peak/h 两列
-  再用:    python seed2_traj.py /root/autodl-tmp/runs_g2_s2 2
-"""
+"""Summarize seed-2 trajectories using the final figure definitions."""
 import os, sys
 import numpy as np
 from figs2 import read_run, deriv, escape_peak, R_ORD, D_ORD
 
-DIR = sys.argv[1] if len(sys.argv) > 1 else "/root/autodl-tmp/runs_g2_s2"
+DIR = sys.argv[1] if len(sys.argv) > 1 else "runs_g2"
 SEED = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 TAIL, NBR = 0.8, 1000
 

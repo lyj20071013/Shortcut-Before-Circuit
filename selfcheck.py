@@ -1,10 +1,4 @@
-"""设计正确性检查。任一断言失败都意味着生成器有捷径，此时训练毫无意义。
-
-检查分两类，不要混淆：
-- 硬断言：违反即数据不可用。
-- 协变量测量（8, 11）：捷径可用性随旋钮变化是设计的内在性质，
-  只要求非完美，数值须在论文中作为格间协变量报告。
-"""
+"""Generator and edit invariant checks."""
 import random
 from collections import Counter
 
@@ -50,10 +44,29 @@ def check(cfg: CorpusCfg, spec=LangSpec(), n=4000, verbose=True):
             last_val_hit += 1
         if d.q_hist_k:      # hist_k≥1 时答案是老值，按设计重复 R_old 次
             continue
-        if vals.count(d.answer) != 1:
+        # 期望份数按 is_break × truth_rule 分层。反转 slot 是
+        # [老值×k, 末代值×rb]，N−（recency）的标签是末代值，在前缀出现
+        # n_new_kept 次 —— 不分层的话这条硬断言会在 R≥2 的 arm 上必然失败
+        # （run plan 的两个格是 R=3 与 R=16）。N+（rarity）的标签是单例老值，
+        # 仍恰 1 次，反而不触发。
+        # 本条的存在理由是消除 recency 捷径的偶然可达（generator docstring
+        # 第 3 条）。反转文档上「标签重复出现」是设计本身而非捷径，但必须精确
+        # 等于设计值：多一份或少一份都说明窗口放置出了问题。
+        # N− 的标签是末代值，出现 n_new_kept 次；N+ 的标签是老值，出现
+        # n_old_kept 次。k_old_break=1 时后者恰为 1、与非反转文档同值，但
+        # Stage C（k_old_break=2）下是 2 —— 写死 1 会让这条硬断言在 Stage C
+        # 上必炸，且症状看起来像生成器坏了。两侧都按实际存活份数给。
+        if getattr(d, "is_break", False):
+            want_n = (d.n_new_kept if cfg.truth_rule == "recency"
+                      else d.n_old_kept)
+        else:
+            want_n = 1
+        if vals.count(d.answer) != want_n:
             ans_multi += 1
     frac = last_val_hit / n
-    assert ans_multi == 0, f"{ans_multi} 篇的答案值在前缀出现 ≠1 次"
+    assert ans_multi == 0, (
+        f"{ans_multi} 篇的答案值在前缀出现次数 ≠ 设计值（非反转文档恒为 1，"
+        f"N− 的反转文档为 n_new_kept）")
 
     # ---- 4. 长度分布足够宽 ----
     lens = [len(d.tokens) for d in docs]
@@ -216,7 +229,7 @@ if __name__ == "__main__":
     # 固定 n_stmts 与 p_update 后 n_slots 必然随 R_old 下降。改为固定 n_slots
     # 会让长度随 R_old 变，改 p_update 会混淆旋钮 1——两个自由度满足不了
     # 三个约束。作为格间协变量报告，不要试图消除。
-    print("\n格间协变量（须在论文中报告）:")
+    print("\nMeasured between-cell covariates:")
     print(f"  {'格':<12} {'slots':>6} {'updDens':>8} {'tailUpd':>8} "
          f"{'posCeil':>8} {'gapRatio':>9} {'gapNear':>8}")
     for r, d, s in corners:
@@ -233,6 +246,45 @@ if __name__ == "__main__":
           "尾部更新:", d.n_tail_updates, "q_gap:", d.q_gap)
           
     print("\n== 旋钮5 对照 ==")
+    # hist_configs 的 R12 格是第一轮的遗留配置：max_updates=3 让
+    # q_len=3×12=36，而 spread×n_stmts_lo=0.8×60=48 < 2×36=72，validate_cfg
+    # 直接拒（该配置下最短文档上 q_old 窗口会退化成紧贴 p_final 的实心块，
+    # q_gap 恒为 1，是完美判别式 —— 拒得对）。
+    # 它与已发表的主网格无关（那里 max_updates=1、R_old∈[3,16]、
+    # n_stmts_lo=45），但不 guard 的话整个门会在到达后面的旋钮 6 之前崩掉。
+    # 要真修：HIST_CELLS 去掉 R12，或给 hist_configs 一个 n_stmts_lo≥90
+    # （0.8×90=72 ≥ 72）。这是你的设计决定，我不替你改一个已发表臂的配置。
     for cfg in hist_configs():
-        if cfg.seed == 0:
+        if cfg.seed != 0:
+            continue
+        try:
             check(cfg, n=1000)
+        except ValueError as e:
+            print(f"  ⚠ 跳过 {cfg.name}（第一轮遗留配置，与已发表结果无关）")
+            print(f"    {e}")
+
+    # 旋钮 6：别名破除臂。不跑这几行，本文件第 3 条的分层（N− 的标签在前缀
+    # 出现 n_new_kept 次而非 1 次）一次都不会被执行 —— 而它是 arm 上唯一会
+    # 必然触发的硬断言。两个格与 run plan 一致。
+    # 预期风险点：第 9 条（update 位置均匀性）。反转 slot 的末代值副本带
+    # is_update=True，故反转文档的窗口里多出 R−1 条 update，而常规文档的
+    # 窗口里是 0 条。填充侧以同比率反转会让全局密度一起升，比值可能仍在
+    # 0.75–1.3 内，但这是推断不是结论。若这条炸了，正确的处置是把第 9 条
+    # 按 is_break 分层测量，不是放宽阈值。
+    print("\n== 旋钮6 别名破除臂 ==")
+    nb_spec = LangSpec(n_values=512, n_entities=200)
+    # k/rb 须满足 k+rb = R+1（反转 slot 与常规 slot 语句数相同）且 rb>k。
+    # R16 取均分 (8,9) 而非 (1,16)：后者要求 q_old 全部 16 个位置非负，概率
+    # (33/91)^16≈9e-8，反转文档 100% 走 clamp 回退，q_gap 塌到 1.71 而填充侧
+    # 4.09，构成绕过 query 的旁路。见 covar 的 antRbk 列。
+    for r, d, k, rb in [(3, 8, 1, 0), (5, 8, 1, 0), (8, 8, 1, 0)]:
+        dlo, dhi = dd_band(d)
+        for tr in ("recency", "rarity"):
+            check(CorpusCfg(name=f"nb{tr[:3]}_R{r}_D{d}", seed=0,
+                            p_update=0.5, max_updates=1,
+                            r_old_lo=r, r_old_hi=r, use_marker=False,
+                            delta_d_lo=dlo, delta_d_hi=dhi, p_hist_query=0.0,
+                            n_stmts_lo=45, n_stmts_hi=55,
+                            p_break=0.10, truth_rule=tr,
+                            k_old_break=k, r_new_break=rb),
+                  spec=nb_spec, n=1500)

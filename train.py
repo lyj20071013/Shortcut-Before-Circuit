@@ -1,23 +1,4 @@
-"""单格训练 + 在线规则归因。每个相图格子一个 run。
-
-跨格严格对齐的量：total_steps、batch_docs、lr schedule、模型规模、seed 策略。
-数据统计是唯一自变量，训练量不得随格变化。文档长度已由 selfcheck 确认
-跨格一致（stmts≈110、len≈445），故 token 预算天然可比，日志仍记实际值备查。
-
-不做 document packing：把多篇文档拼进一个 ctx 会让"倒数第 k 条语句"跨越
-文档边界，position 规则的语义被污染，ΔD 也不再是文档内量。代价是 padding
-浪费约 55% 的 ctx（len≈445 vs ctx_len=1024），换来自变量干净。若要省算力，
-应降 ctx_len 到 512（validate_cfg 会据此收紧 n_stmts_hi），不要 packing。
-
-流式数据：训练集用无限流（每篇文档全新采样，worker 间 seed 不相交），
-评估集与探针集固定在 seed_offset=1，与训练流
-不相交。这是"预训练数据统计 -> 规则"这一因果链的干净实现。
-
-在线探针：只存 final checkpoint，规则轨迹在训练中直接算完写 jsonl。
-90 run × 4 个 log-spaced 探针点，若改为存 ckpt 离线跑，磁盘要 20GB+
-且要重载 90 次。轨迹本身是结果的一部分（规则可能在训练中切换，
-参 Singh et al. 的 ICL 瞬态性）。
-"""
+"""Train one synthetic-task configuration and record diagnostics."""
 import argparse
 import json
 import math
@@ -31,13 +12,15 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from config import CorpusCfg, LangSpec, dd_band
-from generator import Doc, generate_corpus
+from generator import Doc, emit, generate_corpus
 from model import LM, ModelCfg
 from probe import (EDITS, MAIN_GRID_EXCLUDE, RULE_NAMES, TRUTH, attribute,
-                   causal, fit_position_offset, identifiability, rule_groups)
+                   causal, fit_position_offset, grid_exclude, identifiability,
+                   rule_groups, swap_query)
 from vocab import Vocab
 
 PROBE_N = 200          # 在线探针文档数。final ckpt 另跑离线全量
+BREAK_N = 400          # 反转文档池大小（旋钮 6）。见 break_pool 的取样理由
 YIELD_MIN = 0.05
 
 
@@ -136,6 +119,14 @@ def evaluate(model: LM, docs: Sequence[Doc], vocab: Vocab, spec: LangSpec,
     nll = [0.0, 0.0]
     rank = [0, 0]
     top10 = [0, 0]
+    # 旋钮 6：按 is_break 再分一层准确率。go_nogo.classify 的 retrieval 门是
+    # acc≥0.99，而 arm 的 eval 集混有 p_break 比例的反转文档。模型若在反转层
+    # 上没学会，混合 acc 会被压到 1−p_break 以下（p_break=0.10 时 0.90），
+    # classify 判成 none，整个 run 被排除 —— 尽管它在非反转文档上的读数完全
+    # 有效。这是个静默失效：看起来像「arm 没收敛」，实际是门用错了量。
+    # 故单独报 acc_nb（非反转子集），让 classify 用它开门；acc_brk 是反转层
+    # 的行为准确率，与 break_diag 的 p_rec/p_rar 交叉验证。
+    brk = [[0, 0], [0, 0]]          # [非反转, 反转] × [correct, n]
     loss_sum = loss_n = 0.0
     for i in range(0, len(docs), bs):
         chunk = docs[i:i + bs]
@@ -155,6 +146,9 @@ def evaluate(model: LM, docs: Sequence[Doc], vocab: Vocab, spec: LangSpec,
             nll[s] += -float(lp[tv])
             rank[s] += r
             top10[s] += int(r < 10)
+            b = 1 if getattr(d, "is_break", False) else 0
+            brk[b][0] += int(r == 0)
+            brk[b][1] += 1
     model.train()
     nan = float("nan")
 
@@ -174,6 +168,10 @@ def evaluate(model: LM, docs: Sequence[Doc], vocab: Vocab, spec: LangSpec,
                 ans_rank_tail0=a0["ans_rank"], n_tail0=n0,
                 acc_tailpos=a1["acc"], ans_nll_tailpos=a1["ans_nll"],
                 n_tailpos=n1,
+                acc_nb=(brk[0][0] / brk[0][1]) if brk[0][1] else nan,
+                n_nb=brk[0][1],
+                acc_brk=(brk[1][0] / brk[1][1]) if brk[1][1] else nan,
+                n_brk=brk[1][1],
                 chance_acc=1.0 / n_val, chance_nll=math.log(n_val))
 #  --------- 探针适配器 ----------------
 
@@ -234,16 +232,23 @@ def run_probe(model: LM, docs: Sequence[Doc], vocab: Vocab, spec: LangSpec,
     return out
 
 
-def dominant_rule(probe: dict, groups: Optional[Dict[str, str]] = None) -> str:
+def dominant_rule(probe: dict, groups: Optional[Dict[str, str]] = None,
+                  exclude: Optional[frozenset] = None) -> str:
     """相图着色。判据是同一子集上的配对差 rate_disc - rate_truth_disc：
     模型在"规则 k 与真值分歧"的样本上更常跟 k 走，才算被 k 驱动。
-    阈值 0.05 是保守占位，正文须报告着色对阈值的敏感性。
+    阈值为 0.05；此历史分类标签对阈值敏感，不是最终图中的机制标签。
     返回值是等价类标签（见 probe.rule_groups）：不可辨识的规则对必须
-    合并输出，否则严格 > 会按 RULE_NAMES 顺序任意挑一个。"""
+    合并输出，否则严格 > 会按 RULE_NAMES 顺序任意挑一个。
+
+    exclude 默认 MAIN_GRID_EXCLUDE（主网格上 frequency 与 rarity 都不可辨识）。
+    旋钮 6 打开后 rarity 在反转文档上与 last_value 分歧、n_disc>0，必须放回，
+    否则 arm 的第二个仪器（观测归因）根本不会打开 —— 传 grid_exclude(corpus)。
+    """
     a, t = probe["agree"], probe.get("truth_on_disc", {})
+    ex = MAIN_GRID_EXCLUDE if exclude is None else exclude
     best, margin = TRUTH, 0.05
     for k in RULE_NAMES:
-        if k == TRUTH or k in MAIN_GRID_EXCLUDE:
+        if k == TRUTH or k in ex:
             continue
         v, tv = a.get(k, float("nan")), t.get(k, float("nan"))
         if v == v and tv == tv and v - tv > margin:
@@ -307,6 +312,90 @@ def copy_diag(model: LM, docs: Sequence[Doc], vocab: Vocab, spec: LangSpec,
             novel_acc=hit[0] / cnt[0] if cnt[0] else nan, n_novel=cnt[0],
             copy_chance_nll=math.log(n_val))
 
+def break_pool(vocab: Vocab, corpus: CorpusCfg, target: int = BREAK_N,
+               cap: int = 120_000) -> List[Doc]:
+    """专用反转文档池。旋钮 6 的两个仪器都需要它。
+
+    为什么不直接用 eval 集的反转子集：p_break=0.01 时 4000 篇 eval 只含约 40 篇
+    反转文档，行为判别子与 rarity 的 rate_disc 都是点估计，噪声压过信号。
+    在线探针更糟 —— PROBE_N=200 时只有约 2 篇。
+
+    为什么不用 replace(corpus, p_break=1.0)：那会把填充 slot 也全部反转，
+    「末代值被重复」在文档内到处都是，与训练分布差得远。模型在这种输入上的
+    行为不能代表它在训练分布的反转文档上的行为。故按训练分布采样再筛，
+    多花 CPU 换分布一致。
+
+    seed_offset=2 与训练流（1000+w）、eval/probe（1）都不相交。
+    cap 挡住 p_break 极小时的失控：p_break=0.01 时约需 40000 篇（约 12 秒），
+    再小就该调 target 而不是硬等。
+    """
+    if corpus.p_break <= 0.0:
+        return []
+    n_gen = min(cap, max(target * 4, int(target / corpus.p_break * 1.4)))
+    out = [d for d in generate_corpus(vocab, corpus, n_gen, seed_offset=2)
+           if d.is_break]
+    return out[:target]
+
+
+@torch.no_grad()
+def break_diag(model: LM, brk_docs: Sequence[Doc], vocab: Vocab,
+               spec: LangSpec, corpus: CorpusCfg, device) -> dict:
+    """反转文档上的行为判别子 + 观测归因。两个仪器，都独立于因果探针。
+
+    p_rec / p_rar 是模型 argmax 落在末代值 / 老值的比例。两者之和不必为 1
+    （可能都不中）。这是主网格根本没有的东西：那里 acc≥0.999 且两条规则逐篇
+    同指，行为无法识别规则身份。反转层上 N− 应有 p_rec→1、N+ 应有 p_rar→1。
+    两条 arm 都报同一对数字，故可直接比较。
+
+    rar_disc 是 rarity 在观测归因上的 rate_disc。主网格上 rarity 的 n_disc 恒为
+    0（式 1），这条路径第一次有信号 —— 见 probe.grid_exclude。必须在这个池上
+    算而不是在 eval 集上算，理由同 break_pool 的 docstring。
+    """
+    nan = float("nan")
+    if not brk_docs:
+        return dict(pool_n=0, p_rec=nan, p_rar=nan, brk_acc=nan, rar_disc=nan,
+                    rar_ndisc=0, sw_n=0, sw_keep=nan, sw_rec=nan, sw_rar=nan)
+    model.eval()
+    pred = ModelPredictor(model, vocab, spec, device)
+    n_rec = n_rar = n_ans = 0
+    # 旁路检查。反转文档在两处结构上与非反转文档不同，两者都让模型有机会
+    # 不读 query 就认出被查询 slot：
+    #   antRbk  slot 内相邻间距（R3 实测 0.950、R5 0.839、R8 0.674）
+    #   keptBk  q slot 语句数恒为 R+1，而非反转文档只有约 0.6R+1
+    # 后者尤其要紧：目标函数的压力施加在实际冗余度=R 的文档上，而读数取自
+    # 实际冗余度≈0.6R 的文档，而 §5.4 已证效应随实际冗余度放大。模型可以学
+    # 「R+1 条全在 → recency；缺了几条 → rarity」，满足目标函数而完全不改变
+    # 非反转文档上的行为 —— 那样 N− 的极差不收缩，却会被判据表误读成
+    # 「读数是噪声」。两个结构量都只是「模型能绕过」的代理，不是「在绕过」。
+    # 这里直接测：把 query 换成同篇另一个带 update 的 slot，语句序列一字不动、
+    # token 数与 answer_pos 都不变。模型若真读 query，读数必须崩。
+    sw_n = sw_keep = sw_rec = sw_rar = 0
+    for d in brk_docs:
+        got = pred.predict(d)
+        n_rec += int(got == d.val_history[-1])
+        n_rar += int(got == d.val_history[-2])
+        n_ans += int(got == d.answer_val_id)
+        sv = swap_query(d, vocab, corpus)
+        if sv is None:
+            continue
+        sw_n += 1
+        g2 = pred.predict(sv)
+        sw_keep += int(g2 == got)                    # 预测完全不变 = 没读 query
+        sw_rec += int(g2 == d.val_history[-1])
+        sw_rar += int(g2 == d.val_history[-2])
+    offset = fit_position_offset(brk_docs)
+    rows = attribute(brk_docs, pred, offset, vocab)
+    model.train()
+    n = len(brk_docs)
+    return dict(pool_n=n, p_rec=n_rec / n, p_rar=n_rar / n, brk_acc=n_ans / n,
+                rar_disc=rows["rarity"]["rate_disc"],
+                rar_ndisc=rows["rarity"]["n_disc"],
+                sw_n=sw_n,
+                sw_keep=(sw_keep / sw_n) if sw_n else nan,
+                sw_rec=(sw_rec / sw_n) if sw_n else nan,
+                sw_rar=(sw_rar / sw_n) if sw_n else nan)
+
+
 # ---------------- 训练 ----------------
 
 def lr_at(step: int, c: TrainCfg) -> float:
@@ -353,6 +442,15 @@ def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
 
     eval_docs = list(generate_corpus(vocab, corpus, tc.eval_docs, seed_offset=1))
     probe_docs = eval_docs[:PROBE_N]
+    # 旋钮 6 的专用反转池，只建一次（p_break=0 时是空列表，零成本）。
+    # 理由见 break_pool：eval 集的反转子集在小 p_break 下样本太少。
+    brk_docs = break_pool(vocab, corpus)
+    if corpus.p_break > 0.0:
+        print(f"[break] pool={len(brk_docs)} 篇反转文档 "
+              f"(p_break={corpus.p_break}, truth_rule={corpus.truth_rule})")
+        if len(brk_docs) < BREAK_N // 2:
+            print(f"  ⚠ 池只有 {len(brk_docs)} 篇（目标 {BREAK_N}），"
+                  f"p_rec/p_rar 的点估计噪声偏大")
     ident = identifiability(probe_docs, fit_position_offset(probe_docs))
     groups = rule_groups(ident)
     
@@ -445,7 +543,8 @@ def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
         if step % tc.eval_every == 0 or step == tc.total_steps:
             ev = evaluate(model, eval_docs, vocab, spec, device)
             cd = copy_diag(model, eval_docs, vocab, spec, corpus, device)
-            emit(dict(kind="eval", step=step, tokens=tok_seen, **ev, **cd))
+            bd = break_diag(model, brk_docs, vocab, spec, corpus, device)
+            emit(dict(kind="eval", step=step, tokens=tok_seen, **ev, **cd, **bd))
             print(f"  step {step:>6} loss {ev['loss']:.4f} "
           f"copyNLL {cd['copy_nll']:.3f} copyAcc {cd['copy_acc']:.3f} "
           f"novelNLL {cd['novel_nll']:.2f} "
@@ -454,7 +553,7 @@ def train(corpus: CorpusCfg, tc: TrainCfg, mc_kw: Optional[dict] = None,
         
         if step in pts:
             pb = run_probe(model, probe_docs, vocab, spec, corpus, device)
-            dom = dominant_rule(pb, groups)
+            dom = dominant_rule(pb, groups, grid_exclude(corpus))
             emit(dict(kind="probe", step=step, dominant=dom, **pb))
             print(f"  step {step:>6} probe dominant={dom} "
           + " ".join(f"{k}={pb['agree'][k]:.2f}" for k in RULE_NAMES))
@@ -499,8 +598,8 @@ def main():
     ap.add_argument("--eval-docs", type=int, default=TrainCfg.eval_docs)
     ap.add_argument("--eval-every", type=int, default=TrainCfg.eval_every)
     ap.add_argument("--compile", action="store_true")
-    # 诊断用：语言规模与文档形状。都不是论文自变量（自变量只有 R_old 与 ΔD），
-    # 缩小规模不损害主张，只需在正文声明规模并说明 n_bindings 仍远超模型容量。
+    # Optional language/model settings for diagnostic experiments.
+    # Changing them changes the experimental configuration and its scope.
     ap.add_argument("--tie", action="store_true", help="tie embedding 与 unembedding")
     ap.add_argument("--n-values", type=int, default=None)
     ap.add_argument("--n-entities", type=int, default=None)
@@ -539,6 +638,49 @@ def main():
     # 0.110），故 tail0 这个协变量基本不受影响。
     ap.add_argument("--p-update", type=float, default=0.5,
                     help="填充 slot 收到 update 的概率。主网格恒为 0.5")
+    # 旋钮 6：别名破除臂。p_break 比例的文档把被查询 slot 的多重性反转，
+    # rarity 与 recency 在这些文档上分歧，式 1 不再成立。
+    #   --truth-rule recency  N−：标签恒为末代值。非反转文档上目标函数与 Bayes
+    #                         规则都没变，这是「同任务、别名破除」对照。
+    #                         p_break=0 时它就是主网格（逐比特相同），故剂量
+    #                         曲线的 0 点直接复用已发表的 run。
+    #   --truth-rule rarity   N+：反转文档的标签是老值，目标函数惩罚 recency。
+    #                         这是仪器正对照，证明探针能给出可复现的强正信号。
+    # 两条 arm 在同 seed 下 token 前缀逐比特相同（truth_rule 不消耗随机数），
+    # 只有反转文档的标签 token 不同 —— 见 nb_pair.py 的配对断言。
+    # 初始化与数据顺序的解耦。默认 None 时 corpus.seed = a.seed，与已发表的
+    # 75 个 run 逐比特相同 —— 这个旗标不改变任何现有命令的行为。
+    #
+    # 为什么需要它：torch.manual_seed(tc.seed) 定初始化，而 generate_corpus 用
+    # random.Random(cfg.seed + 1000003*seed_offset) 定文档流，两者本来分离，
+    # 但 CLI 把它们绑在同一个 --seed 上。于是论文里"changing the seed reaches
+    # 0.879"这句话，动的是初始化与数据顺序两件事，无法归因到其中任一。
+    #
+    # 给定 --seed S --data-seed T：初始化由 S 定，文档流由 T 定。
+    #   同 S 不同 T   -> 同初始化、不同数据顺序。跨 T 的极差就是数据顺序的贡献。
+    #   同 T 不同 S   -> 同数据顺序、不同初始化。跨 S 的极差就是初始化的贡献。
+    # 两者之和与主网格的 0.879 对比，即得方差分解。
+    #
+    # 附带用途：同初始化的一对 run 更可能落在同一个置换胞腔里，interp.py 的
+    # 插值路径因此可读（主网格那对是两次独立初始化，朴素插值会有巨大壁垒）。
+    # 这一点是概率性的而非保证的 —— 据我记忆 Frankle 等人关于 linear mode
+    # connectivity 的结果是：训练早期存在一个"稳定点"，过了它之后同初始化
+    # 不同数据顺序的两个 run 才线性连通，之前并不。所以先跑再判断，
+    # 别预设它一定平。
+    ap.add_argument("--data-seed", type=int, default=None,
+                    help="文档流的 seed，默认跟随 --seed。给出时与初始化解耦，"
+                         "必须同时给 --tag（否则与主网格 run 同名互相覆盖）")
+    ap.add_argument("--p-break", type=float, default=0.0,
+                    help="反转文档比例。0 = 主网格（旋钮 6 关闭）")
+    ap.add_argument("--truth-rule", default="recency",
+                    choices=["recency", "rarity"],
+                    help="反转文档的标签规则。recency=N−，rarity=N+")
+    ap.add_argument("--k-old-break", type=int, default=1,
+                    help="反转 slot 的老值份数。Stage C 用 2 让编辑输出重回"
+                         "训练分布外")
+    ap.add_argument("--r-new-break", type=int, default=0,
+                    help="反转 slot 的末代值份数。0 = 取 r_old_hi，令反转 slot"
+                         "语句数与常规相同")
     a = ap.parse_args()          # <- 必须在所有 add_argument 之后
 
     over = {k: v for k, v in
@@ -570,10 +712,38 @@ def main():
     if a.qk_gain is not None:
         mkw["qk_norm_gain"] = a.qk_gain
     
-    corpus = CorpusCfg(name=f"R{a.r}_D{a.d}_s{a.seed}", seed=a.seed,
+    # 文档流的 seed。默认跟随 a.seed（与已发表 run 逐比特相同）；给了
+    # --data-seed 就与初始化解耦。name 仍用 a.seed，靠 --tag 区分文件名。
+    data_seed = a.data_seed if a.data_seed is not None else a.seed
+    corpus = CorpusCfg(name=f"R{a.r}_D{a.d}_s{a.seed}", seed=data_seed,
                        p_update=a.p_update, max_updates=1,
                        r_old_lo=a.r, r_old_hi=a.r, use_marker=False,
-                       delta_d_lo=dlo, delta_d_hi=dhi, p_hist_query=0.0, **ckw)
+                       delta_d_lo=dlo, delta_d_hi=dhi, p_hist_query=0.0,
+                       p_break=a.p_break, k_old_break=a.k_old_break,
+                       r_new_break=a.r_new_break, truth_rule=a.truth_rule,
+                       **ckw)
+    if a.data_seed is not None and a.data_seed != a.seed:
+        if not a.tag:
+            ap.error("--data-seed 偏离 --seed 时必须给 --tag：corpus.name 只由 "
+                     "R/D/seed 构成，会与主网格 run 同名互相覆盖")
+        print(f"[dseed] 初始化 seed={a.seed}，文档流 seed={a.data_seed}"
+              f"（已解耦）。主网格是两者相同的特例。")
+    if a.p_break > 0.0:
+        if not a.tag:
+            ap.error("--p-break > 0 时必须给 --tag：tag 只由 R/D/seed 构成，"
+                     "会与主网格 run 同名互相覆盖")
+        # N+ 与 N− 的 tag 必须不同，否则两条 arm 互相覆盖，而它们的
+        # jsonl/pt 文件名只由 tag 决定。tag 里带 rec/rar 是 run plan 的约定。
+        if a.truth_rule[:3] not in a.tag:
+            ap.error(f"--tag='{a.tag}' 里没有 '{a.truth_rule[:3]}'："
+                     f"N+ 与 N− 的 tag 必须可区分，否则同 seed 同格的两条 arm "
+                     f"会写到同一个文件。用 nb{a.truth_rule[:3]}<档位> 这类命名。")
+        rb = a.r_new_break or a.r
+        print(f"[break] p_break={a.p_break} truth_rule={a.truth_rule} "
+              f"反转 slot = [老值×{a.k_old_break}, 末代值×{rb}]"
+              f"（常规 = [老值×{a.r}, 末代值×1]）")
+        print(f"        别名破除比例应为 {a.p_break:.3f}；"
+              f"collide.py --p-break {a.p_break} 是前置硬门")
     if a.p_update != 0.5:
         if not a.tag:
             ap.error("--p-update 偏离主网格时必须给 --tag："
