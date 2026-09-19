@@ -1,218 +1,428 @@
-# Anonymous code and data supplement
+<div align="center">
 
-**Paper:** Same Task Performance, Different Intervention Readouts: Cross-Run Variation under In-Context Rule Aliasing
+# Same Task Performance, Different Intervention Readouts
 
-This archive contains the available source code, saved training trajectories, terminal probe summaries, per-document intervention records, and selected probe inputs. The main study uses 25 configurations and three seeds. Additional directories retain seed extensions, schedule changes, supervision controls, architecture changes, and rendered-language/fine-tuning arms.
+### Cross-Run Variation under In-Context Rule Aliasing
 
-**No model weights or checkpoints are distributed in this archive.** Saved-record analysis works without them. New model evaluations, gradient measurements, and ablations require training the relevant models first. See the explicit coverage limits below; this is not a claim that every appendix table can be reconstructed directly from the bundled logs.
+<a href="https://arxiv.org/abs/2608.24460">
+  <img src="https://img.shields.io/badge/arXiv-2608.24460-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv:2608.24460">
+</a>
+<a href="https://github.com/lyj20071013/Shortcut-Before-Circuit">
+  <img src="https://img.shields.io/badge/Code-GitHub-181717?style=for-the-badge&logo=github" alt="GitHub repository">
+</a>
+<img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
+<img src="https://img.shields.io/badge/PyTorch-CUDA-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch">
 
-## 1. Start here
+**Yijun Liao · Fanwei Liang**
 
-Run commands from the directory containing this README. Use UTF-8 output when redirecting script output on Windows.
+Controlled experiments on the reproducibility of intervention-based
+mechanistic measurements across independently trained transformers.
 
-~~~bash
+</div>
+
+---
+
+## Overview
+
+Can two models solve the same task almost perfectly while responding very
+differently to the same mechanistic intervention?
+
+We study this question in a controlled in-context retrieval setting. Every
+training document is constructed so that two candidate answer rules are
+observationally equivalent:
+
+```text
+RECENCY: choose the most recently assigned value
+RARITY:  choose the least frequent value in the queried slot
+```
+
+Because both rules select the same answer on every training example, task
+accuracy cannot distinguish them. We then apply an answer-preserving
+multiplicity intervention that makes their predictions diverge while keeping
+the correct answer, answer position, token count, statement count, and all
+non-target tokens fixed.
+
+Across **75 independently trained 26.1M-parameter transformers** in
+**25 configurations**:
+
+- every analyzed run reaches in-distribution accuracy of at least **0.999**;
+- **13/25 configurations** have a cross-seed intervention-readout range above
+  `0.3`;
+- the largest range is **0.879**;
+- replacing the probe batch changes the readout by at most **0.034** in four
+  tested extreme runs;
+- on separately generated documents where RECENCY and RARITY disagree,
+  **70/75 baseline runs never select the rarity answer**, and the remaining
+  five do so at a rate of at most `0.003`.
+
+The central result is therefore not that different seeds implement different
+observable answer rules.
+
+> **Task behavior can reproduce while an intervention-based sensitivity
+> measurement does not.**
+
+A directional result can be statistically decisive within one trained model
+and still fail to reproduce after retraining the same architecture on the same
+task.
+
+---
+
+## What the readout measures
+
+Let `v*` be the contrast value and `v_truth` the preserved correct answer. For
+the base and edited versions of the same document, we measure
+
+```text
+Δ = [log p(v*) - log p(v_truth)]edit
+  - [log p(v*) - log p(v_truth)]base
+```
+
+The primary summary is the fraction of valid document pairs with `Δ > 0`.
+A positive value is a rarity-directed displacement; a negative value is an
+occurrence-count-directed displacement.
+
+This quantity is an **intervention response**. It is not, by itself:
+
+- a classifier of the model's answer policy;
+- evidence that a unique internal mechanism has been identified;
+- a configuration-level label that can safely be inferred from one seed; or
+- proof that a particular circuit exists.
+
+The retrieval-state criteria determine which terminal runs are eligible for
+comparison. Passing those criteria does not identify an internal circuit and
+does not guarantee temporal stability of the readout.
+
+---
+
+## Main findings
+
+### 1. Cross-run variation
+
+All 75 main-grid runs solve the task, but independently trained models in the
+same configuration can give very different intervention readouts.
+
+| Cell | seed 0 | seed 1 | seed 2 | range |
+| --- | ---: | ---: | ---: | ---: |
+| `R_old=3, ΔD=8` | 0.098 | 0.477 | **0.977** | **0.879** |
+| `R_old=3, ΔD=5` | 0.126 | **0.972** | 0.270 | 0.845 |
+| `R_old=5, ΔD=2` | 0.781 | 0.175 | **0.967** | 0.792 |
+| `R_old=3, ΔD=3` | 0.365 | **0.934** | 0.930 | 0.569 |
+| `R_old=16, ΔD=16` | **0.977** | 0.469 | 0.969 | 0.508 |
+
+The largest differences are not explained by resampling probe documents. In
+the two widest cells, exchanging the trained model while holding the probe
+batch fixed reproduces the cross-run gap within sampling error.
+
+### 2. Intervention sensitivity is not answer policy
+
+We evaluate the same checkpoints on newly generated documents where RECENCY
+and RARITY select different answers. The rarity-answer rate is:
+
+- exactly `0.000` in 70 of the 75 main-grid runs;
+- at most `0.003` in the other five.
+
+Across all 28,563 valid edited pairs, 98.68% of value-vocabulary argmaxes remain
+on the preserved correct answer. The cross-seed variation therefore concerns
+log-odds movement under intervention, not different observable answer
+policies.
+
+### 3. Supervision changes the measurement
+
+We introduce disagreement documents during training and label them according
+to either RECENCY or RARITY.
+
+- The **RARITY-labeled** arm produces a behavioral rarity preference and large
+  positive displacements, providing a trained positive control.
+- In the selected `R_old=3, ΔD=8` cell, the **RECENCY-labeled** arm has lower
+  observed cross-seed dispersion than the aliased baseline.
+
+The dispersion comparisons are exploratory: the cell was selected using the
+original grid, sample sizes remain limited, and the comparisons are not
+selection-adjusted. They should not be interpreted as a general causal proof
+that rule aliasing is sufficient for cross-run dispersion.
+
+### 4. The readout depends on the training process
+
+The saved experiments separate several sources of variation:
+
+- replacing the probe batch has a small effect in the tested extreme runs;
+- changing the training-document stream at fixed initialization produces
+  substantial dispersion;
+- the readout can drift across post-gate checkpoints at unchanged accuracy;
+- changing the cosine period or removing annealing can move individual runs
+  substantially;
+- width, depth, supervision, and surface form can all change the measurement.
+
+Document-sampling uncertainty, within-run temporal variation, and variation
+between independently trained models are different quantities and are reported
+separately.
+
+### 5. Pre-retrieval readouts can point in the opposite direction
+
+Predominantly negative readouts occur before the retrieval-state criteria are
+met in every redundancy row. These values are retained as training-dynamics
+diagnostics, not as answer-rule or circuit attributions.
+
+Passing the retrieval gate is necessary for the terminal comparison, but it is
+not sufficient to make a single-run mechanistic conclusion temporally stable.
+
+---
+
+## Repository contents
+
+The repository includes source code and the available machine-readable records
+used by the analyses. It does **not** include model weights or checkpoints.
+
+| Path | Contents |
+| --- | --- |
+| `runs_g2/` | Canonical 75-run grid, terminal and per-document probes, transition summaries, and selected intervention records |
+| `runs_g2_seeds/` | Expanded seed sample for `R_old=3, ΔD=8` |
+| `runs_nb/` | RECENCY/RARITY disagreement-supervision arms, dose extensions, failures, and rescue runs |
+| `runs_constlr/`, `runs_cos32/` | Constant-learning-rate and changed-cosine-period experiments |
+| `runs_dseeds/` | Fixed initialization with different training-document streams |
+| `runs_depth/`, `runs_w1024/` | Depth and 102.2M-parameter width experiments |
+| `runs_gamma1/` | QK-normalization gain control |
+| `runs_slot/`, `runs_pupd/`, `runs_fixband/` | Slot-count, update-density, and fixed-band controls |
+| `runs_nl/`, `runs_ft/` | Rendered-English and Qwen2.5-0.5B fine-tuning trajectories |
+| `runs_flat/` | Available exploratory readout/loss-geometry records |
+| `nl_data/`, `ft_data/` | Archived probe arrays and tokenizer/vocabulary metadata |
+| `CODE_INDEX.md` | Script-by-script source-code index |
+| `COVERAGE.md` | Paper-to-artifact coverage map and missing-output disclosures |
+| `manifest.json` | File sizes, checksums, record counts, and packaging provenance |
+
+The pair `(experiment directory, run tag)` identifies a run. Some directories
+reuse tags, so runs must not be merged by tag alone.
+
+---
+
+## Quick start: analyze the saved records
+
+Clone the repository and create an analysis environment:
+
+```bash
+git clone https://github.com/lyj20071013/Shortcut-Before-Circuit.git
+cd Shortcut-Before-Circuit
+
+python -m venv .venv
+source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -r requirements-analysis.txt
+```
+
+Verify the distributed artifact and regenerate the two paper figures:
+
+```bash
 python validate_bundle.py
 python figs2.py --prefix outputs/fig
-~~~
+```
 
-The last command regenerates the two final figures from the supplied records. It performs no training and reads no checkpoint. The scripts create the output directory.
+These commands use the saved JSON/JSONL records and do not require a GPU or a
+checkpoint.
 
-Python 3.13.1, NumPy 2.2.6, Matplotlib 3.10.6 and SciPy 1.16.3 were available for packaging checks. These are the packaging environment, not a recovered lockfile for the original training jobs. The analysis requirements pin that environment. The original logs do not capture a complete package lockfile or all GPU/driver details.
+Additional audit commands:
 
-For training, install a PyTorch build appropriate for the available CUDA environment and the optional pretrained-model dependencies:
-
-~~~bash
-python -m pip install -r requirements-training.txt
-~~~
-
-The training code uses PyTorch, streamed synthetic data, and GPU mixed precision. The provided multi-worker training configuration is intended for Linux/CUDA. Using a different worker count or numerical environment may change the sampled stream or optimization trajectory; no cross-platform bitwise-reproduction guarantee is made. Full training was not run as part of packaging.
-
-## 2. What is in the archive
-
-| Path | Purpose |
-|---|---|
-| Top-level Python files | Training, generators, model, probe, and analysis code. See CODE_INDEX.md. |
-| runs_g2/ | Canonical 75-run grid, terminal and per-document probes, argmax/threshold summaries, shared-batch and model-intervention records, and a few auxiliary records. |
-| runs_g2_seeds/ | Expanded seed sample for the selected R_old=3, D=8 cell. |
-| runs_nb/ | Disagreement-supervision doses, both labeling rules, second-cell extensions, failed/rescue conditions, and available non-aliased geometry records. |
-| runs_constlr/, runs_cos32/ | Constant-learning-rate and changed-cosine-period arms. |
-| runs_dseeds/ | Initialization held fixed while the document-stream seed varies. |
-| runs_gamma1/, runs_depth/, runs_w1024/ | QK-gain, depth, and width controls. |
-| runs_slot/, runs_pupd/, runs_fixband/ | Slot-count, update-probability, and fixed-distance-band controls. |
-| runs_nl/, runs_ft/ | Rendered-language training and pretrained-model fine-tuning trajectories. |
-| runs_flat/ | Available exploratory geometry trajectories, terminal probes and flatdir outputs. These do not include the complete final flatctrl table outputs. |
-| nl_data/, ft_data/ | Vocabulary/token-pool metadata and JSON-encoded archived probe arrays. |
-| nl_collide.jsonl | Saved rendered-language candidate-rule collision records. |
-| archived_reports/ | Historical calibration reports preserved as JSON text strings; these are not newly reconstructed statistics. |
-| archived_summaries/ | An additional fine-tuning summary export with a different schema. Use the main runs_ft logs and current ft_read.py for analysis. |
-| manifest.json | File sizes, SHA-256 checksums, record counts, and packaging provenance. |
-| COVERAGE.md | Mapping from paper topics to available inputs and missing original outputs. |
-
-Training logs, terminal summaries, and per-document records are intentionally distinct. A directory also contains unsuccessful or historical runs when they belong to the reported controls. Their presence does not make them eligible for a pooled result.
-
-## 3. Data schema and interpretation
-
-- A training trajectory usually begins with a kind=meta object containing corpus, train, model and spec fields, followed by train, eval, probe and done records. NL and FT use related but different metadata schemas.
-- Terminal go_nogo summaries contain run tags and aggregate measurements. Per-document records are stored separately in files ending in perdoc.jsonl.
-- The pair **(experiment directory, run tag)** identifies a run. Some extension directories reuse tags; do not merge runs by tag alone.
-- Historical summaries may contain legacy seed fields. Canonical grid tags encode the seed used by figs2.py and the current main-grid analysis.
-- JSONL means one JSON object per line. Existing Python-generated logs retain NaN for undefined measurements; Python's json reader accepts this extension. NaN is not zero, and strict JSON tools may need to handle it explicitly.
-- Numeric observations have not been edited during packaging. A server-directory prefix was removed from the additional geometry records; probe arrays were represented by JSON values, exact dtype, shape and array checksums.
-- Training-time probes and terminal probes can have different document counts. Do not silently pool them.
-- In the main grid, frac_positive/frac_expected denotes positive intervention displacement among valid edit pairs; it is not a behavioral rarity-answer rate. The exact field meaning is arm-specific, particularly for FT gated versus ungated summaries.
-- A mass-restricted median and an unrestricted median summarize different document populations. Use the paper's stated population when selecting fields.
-- Implementation comments are retained. Author-facing revision notes and overstrong diagnostic interpretations were clarified for distribution. Archived reference constants and diagnostic checks remain; saved measurements are unchanged. Historical checks can still refer to earlier drafts, so use the final paper for the stated analysis populations and claims.
-
-## 4. Analyses from saved records
-
-These commands use existing JSON/JSONL inputs. Creating the figures and validating the archive were exercised during packaging; the numerical audit commands below were not rerun as part of packaging.
-
-First create a fresh output directory if needed:
-
-~~~bash
-python -c "from pathlib import Path; Path('outputs').mkdir(exist_ok=True)"
-~~~
-
-### Main grid and figures
-
-~~~bash
-python figs2.py --prefix outputs/fig
-python paper_numbers.py --s0-dir runs_g2 --s1-dir runs_g2 --s2-dir runs_g2 --gonogo runs_g2/go_nogo.txt.jsonl
+```bash
+# Main-grid quantities and run inventory
+python paper_numbers.py \
+  --s0-dir runs_g2 --s1-dir runs_g2 --s2-dir runs_g2 \
+  --gonogo runs_g2/go_nogo.txt.jsonl
 python run_ledger.py --root . --out outputs/ledger.tsv
-~~~
 
-Use the final figs2.py for the candidate-peak definitions and final figure labels. Historical figure scripts are excluded.
+# Argmax transitions and magnitude thresholds
+python argmax_transitions.py \
+  runs_g2/go_nogo_argmax_v1.txt.jsonl \
+  --perdoc runs_g2/go_nogo_argmax_v1.txt.perdoc.jsonl \
+  --json outputs/argmax.json \
+  --txt outputs/argmax.txt \
+  --tex outputs/argmax.tex
 
-### Argmax transitions and magnitude thresholds
+python magnitude_thresholds.py \
+  --perdoc runs_g2/go_nogo_argmax_v1.txt.perdoc.jsonl \
+  --summary runs_g2/go_nogo_argmax_v1.txt.jsonl \
+  --out outputs/magnitude
 
-~~~bash
-python argmax_transitions.py runs_g2/go_nogo_argmax_v1.txt.jsonl --perdoc runs_g2/go_nogo_argmax_v1.txt.perdoc.jsonl --json outputs/argmax.json --txt outputs/argmax.txt --tex outputs/argmax.tex
-python magnitude_thresholds.py --perdoc runs_g2/go_nogo_argmax_v1.txt.perdoc.jsonl --summary runs_g2/go_nogo_argmax_v1.txt.jsonl --out outputs/magnitude
-~~~
-
-### Supervision, schedules and architecture
-
-~~~bash
+# Supervision, schedules, data streams, and architecture
 python verify_dose01.py --root .
-python constlr_read.py --seeds 0 1 2 3 4 5 6 7 8 9 --at 16000 --json outputs/constlr.json
+python constlr_read.py --seeds 0 1 2 3 4 5 6 7 8 9 --at 16000 \
+  --json outputs/constlr.json
 python dseed_read.py --dir runs_dseeds --out outputs/dseeds.json
 python depth_peaks.py --dir runs_depth
 python fixband_analyze.py runs_fixband
 python ft_read.py --dir runs_ft --out outputs/ft_summary.json
-python traj.py runs_g2 --seeds 0 1 2 --suffix _grid
-~~~
+```
 
-The label-permutation calculations in run_ledger.py and verify_dose01.py enumerate the specified reference assignments. Their output does not resolve selection bias, establish exchangeability, or turn the selected-cell comparisons into confirmatory evidence.
+The permutation calculations in the supervision analyses enumerate the stated
+reference assignments. Enumeration does not remove selection bias, establish
+exchangeability, or turn the selected-cell comparisons into confirmatory
+evidence.
 
-nb_dose.py can display selected cache sets. The expanded-seed comparisons should use the explicit run identities in run_ledger.py / verify_dose01.py, rather than indiscriminately merging every cache.
+---
 
-### Available geometry records
+## Recreate a synthetic training run
 
-~~~bash
-python summarize_flat.py runs_flat/flatdirR3_D5.jsonl runs_flat/flatdirR16_D2.jsonl runs_flat/flatdirR3_D5_s1.jsonl
-~~~
+Install the training dependencies with a PyTorch build appropriate for your
+CUDA environment:
 
-These files describe the available exploratory readout/loss geometry measurements. They are not a substitute for the missing full control-readout output listed in COVERAGE.md.
+```bash
+python -m pip install -r requirements-training.txt
+```
 
-## 5. Recreate synthetic training runs
+The safest way to reproduce a configuration is to start from its recorded log.
+The following command prints a retraining recipe without launching training:
 
-Prefer the configuration recorded in a particular log to a script's general-purpose defaults. In particular, the model MLP width must be copied exactly, not inferred from a rounded width ratio.
+```bash
+python retrain_from_log.py \
+  runs_g2/R3_D8_s0_grid.jsonl \
+  --out outputs/retrained_main
+```
 
-The supplied helper first prints a recipe without loading a model:
+Add `--execute` to start the run:
 
-~~~bash
-python retrain_from_log.py runs_g2/R3_D8_s0_grid.jsonl --out outputs/retrained_main
-~~~
+```bash
+python retrain_from_log.py \
+  runs_g2/R3_D8_s0_grid.jsonl \
+  --out outputs/retrained_main \
+  --execute
+```
 
-To run that recipe:
+To list or launch the complete 5 × 5 × 3 grid:
 
-~~~bash
-python retrain_from_log.py runs_g2/R3_D8_s0_grid.jsonl --out outputs/retrained_main --execute
-~~~
-
-It calls the provided training function with the saved corpus, training, model and vocabulary settings. The output directory is changed so archived logs are not overwritten. It is a retraining recipe, not a checkpoint-resume command. Use a fresh destination.
-
-For the entire main grid, sweep.py contains the explicit 5 x 5 x 3 configuration:
-
-~~~bash
+```bash
 python sweep.py --dry-run --out outputs/retrained_grid
 python sweep.py --out outputs/retrained_grid
-~~~
+```
 
-The second command starts the grid. Completed training creates weights that can then be evaluated:
+After training, evaluate a checkpoint with:
 
-~~~bash
-python go_nogo.py R3_D8_s0_grid --out outputs/retrained_main --docs 400
-~~~
+```bash
+python go_nogo.py R3_D8_s0_grid \
+  --out outputs/retrained_main \
+  --docs 400
+```
 
-Other synthetic arms with complete corpus/train/model/spec metadata can use retrain_from_log.py in the same way. The helper preserves the recorded MLP width, learning-rate schedule, initial gain, seed, worker count and training budget. Historical logging/probe density can differ between recorded jobs and the current source, so this is not a guarantee of identical intermediate logging.
+Training uses streamed synthetic documents and GPU mixed precision. Different
+worker counts, CUDA/PyTorch versions, or numerical environments may change the
+sampled stream or optimization trajectory. Cross-platform bitwise identity is
+not guaranteed.
 
-For FP32 intermediate checkpoints needed by geometry analyses, specify steps explicitly:
+---
 
-~~~bash
-python retrain_from_log.py runs_flat/R3_D5_s0_flat.jsonl --out outputs/retrained_flat --ckpt-steps 400,1000,2000,3000,4000,5000,6000,8000,10000,12000,14000,16000 --execute
-~~~
+## Rendered-language and pretrained-model arms
 
-The resulting checkpoints can be passed to flatdir.py and flatctrl.py. The existing flatctrl.py covers edit-based controls; it does not implement the two objective-constrained readouts needed to reconstruct the complete final geometry comparison. Do not treat a run of that script as reproduction of the entire final table.
+Restore the archived probe arrays, including dtype, shape, and checksum
+validation:
 
-qk_bound.py implements the RoPE-safe upper bound used in the corrected appendix. It requires a supplied or retrained checkpoint:
-
-~~~bash
-python qk_bound.py outputs/retrained_gamma/R3_D5_s0_gamma1.pt --json outputs/qk_bounds.json
-~~~
-
-This computes an upper bound from gain vectors, not the attained attention gaps. gamma_table.py summarizes terminal probe measurements and does not compute this bound.
-
-## 6. Rendered-language and fine-tuning inputs
-
-The original small probe arrays are encoded as readable JSON values. Restore them, with dtype/shape/checksum validation, by running:
-
-~~~bash
+```bash
 python restore_probe_arrays.py --out generated_inputs
-~~~
+```
 
-This restores ft_data/probe_R3_D8.npz and the archived nl_data/probe_R3_D8_s0.npz under generated_inputs, together with available metadata. It does not create model weights.
+Generate current rendered-language inputs and train from scratch:
 
-The saved NL probe uses an older seed-suffixed filename. The current nl_train.py expects a shared probe_R3_D8.npz generated by the current nl_corpus.py. Keep the archived probe for inspection; generate current NL inputs explicitly instead of silently renaming it:
-
-~~~bash
+```bash
 python nl_corpus.py --rows 3 --cols 8 --out generated_inputs/nl_current
-python nl_train.py --r 3 --d 8 --seed 0 --data generated_inputs/nl_current --out outputs/retrained_nl
-~~~
+python nl_train.py \
+  --r 3 --d 8 --seed 0 \
+  --data generated_inputs/nl_current \
+  --out outputs/retrained_nl
+```
 
-Repeat with the recorded seeds for the other runs. NL training data stream online; the unrelated legacy finite training-array file is excluded.
+Rebuild tokenizer-level inputs and fine-tune Qwen2.5-0.5B:
 
-FT uses the external pretrained model Qwen/Qwen2.5-0.5B. Its weights and tokenizer are not bundled. The archived logs record the model name but not an immutable upstream revision. Pretrained-model reproducibility consequently also depends on obtaining the intended upstream assets.
+```bash
+python ft_data.py \
+  --model Qwen/Qwen2.5-0.5B \
+  --src hf --no-mirror \
+  --out generated_inputs/ft_current
 
-The archived FT probe can be restored as above. Alternatively, rebuild tokenizer-level inputs:
+python ft_train.py \
+  --model Qwen/Qwen2.5-0.5B \
+  --src hf --no-mirror \
+  --seed 0 \
+  --data generated_inputs/ft_current \
+  --out outputs/retrained_ft \
+  --tag ft
+```
 
-~~~bash
-python ft_data.py --model Qwen/Qwen2.5-0.5B --src hf --no-mirror --out generated_inputs/ft_current
-python ft_train.py --model Qwen/Qwen2.5-0.5B --src hf --no-mirror --seed 0 --data generated_inputs/ft_current --out outputs/retrained_ft --tag ft
-~~~
+The upstream model and tokenizer are not distributed here, and the archived
+logs do not record an immutable upstream revision.
 
-The explicit --no-mirror option uses the configured official Hugging Face source rather than the historical mirror default. ModelScope support is optional and is not needed for these commands.
+---
 
-## 7. Coverage limits
+## Data schema notes
 
-The following original artifacts were not available for this archive:
+- Training trajectories normally begin with a `kind="meta"` object, followed
+  by training, evaluation, probe, and completion records.
+- Terminal summaries and per-document records are separate files and should not
+  be pooled silently.
+- `frac_positive` is the fraction of valid edit pairs with positive
+  displacement; it is not a behavioral rarity-answer rate.
+- `NaN` represents an undefined measurement, not zero. Some historical JSONL
+  files use Python's non-strict `NaN` literal.
+- Mass-restricted and unrestricted summaries describe different document
+  populations. Use the population specified by the corresponding analysis.
+- Failed and historical runs are retained when they are part of a reported
+  control. Their presence does not make them eligible for every pooled result.
 
-1. Raw logs for the excluded R_old=2 group discussed in the positional-shortcut appendix. That group is outside the 75-run main grid. The general generator, train.py, overlap.py and evaluation code are provided, but a complete original-run configuration/log export for that group is not bundled.
-2. The full final flatctrl output containing the edit-based controls and the two objective-constrained readouts. Available flatdir records, geometry trajectories and non-aliased geometry records are included. The supplied flatctrl.py does not contain those two additional objective-constrained readouts.
-3. Original output files for the non-aliased head/residual-patching experiments. heads.py is provided. Available aliased-grid ablation, joint-ablation and interpolation/shared-batch records are included in runs_g2.
-4. All terminal and intermediate model weights, including the QK gains needed to recompute the terminal bound column directly.
-5. A complete locked training environment and immutable revision of external pretrained assets.
+---
 
-These limits concern archive coverage. The paper contains the reported summaries, and the provided generators/training code support new runs, but unavailable original records are not fabricated or reconstructed from rounded paper values.
+## Coverage and limitations
 
-The reproducibility statement should describe the supplied code and available logs, rather than promise direct reconstruction of every table from this archive.
+The repository supports the saved-record analyses for the main grid and the
+available extensions, but it does not claim direct reconstruction of every
+appendix result.
 
-## 8. File integrity and provenance
+The following original artifacts are not distributed:
 
-Run python validate_bundle.py to verify hashes and parse the distributed JSON/JSONL. It checks packaging integrity, not the scientific correctness of measurements. manifest.json records per-file checksums, record counts and transformations.
+1. raw logs for the excluded `R_old=2` group;
+2. the complete final geometry-control output, including two
+   objective-constrained readouts;
+3. original non-aliased head- and residual-patching output files;
+4. terminal and intermediate model weights or checkpoints; and
+5. a complete original training lockfile and immutable revision of external
+   pretrained assets.
 
-Packaging changes include short English module introductions, clarified internal documentation and diagnostic messages, portable defaults for several readers, a server-path-prefix removal in additional geometry records, and reversible representation of small probe arrays as JSON. The three reproduction helpers and the validator are supplied with this archive. The source experiment functions were not replaced by alternative implementations.
+`runs_flat/` therefore provides only the available exploratory geometry
+records. The supplied `flatctrl.py` should not be treated as a reconstruction
+of the complete final geometry table.
 
-No manuscript source, author names, email addresses, repository history, cache folders, checkpoints, API credentials or unrelated external-source extraction corpora are intentionally included. No new software/data license is assigned by this packaging step.
+See [`COVERAGE.md`](COVERAGE.md) for the paper-to-artifact map and
+[`CODE_INDEX.md`](CODE_INDEX.md) for the source-code index.
 
+---
+
+## Artifact integrity
+
+`manifest.json` records file sizes, SHA-256 checksums, JSON/JSONL record counts,
+and packaging provenance. Run:
+
+```bash
+python validate_bundle.py
+```
+
+This checks distribution integrity and parseability. It does not independently
+recompute or certify the scientific conclusions.
+
+---
+
+## Citation
+
+```bibtex
+@misc{liao2026interventionreadouts,
+  title        = {Same Task Performance, Different Intervention Readouts:
+                  Cross-Run Variation under In-Context Rule Aliasing},
+  author       = {Liao, Yijun and Liang, Fanwei},
+  year         = {2026},
+  eprint       = {2608.24460},
+  archivePrefix= {arXiv},
+  primaryClass = {cs.CL},
+  url          = {https://arxiv.org/abs/2608.24460}
+}
+```
+
+## License
+
+The code is released under the [Apache License 2.0](LICENSE).
+
+The paper is distributed separately under the license shown on its arXiv
+record. Model and tokenizer assets obtained from external providers remain
+subject to their respective licenses.
